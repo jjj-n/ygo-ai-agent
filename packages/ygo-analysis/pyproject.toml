@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ygo-analysis"
+version = "0.1.0"
+description = "YGO Analysis MCP Server - simulation and evaluation"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.0.0",
+    "pydantic>=2.0.0",
+    "ygo-engine-bridge",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ygo_analysis"]
+
+[tool.hatch.metadata]
+allow-direct-references = true

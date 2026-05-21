@@ -1,0 +1,6 @@
+[submodule "libs/ygopro-core"]
+	path = libs/ygopro-core
+	url = https://github.com/edo9300/ygopro-core.git
+[submodule "libs/ygopro-scripts"]
+	path = libs/ygopro-scripts
+	url = https://github.com/edo9300/ygopro-scripts.git

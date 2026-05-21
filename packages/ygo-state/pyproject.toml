@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ygo-state"
+version = "0.1.0"
+description = "YGO State MCP Server - game state queries"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.0.0",
+    "pydantic>=2.0.0",
+    "ygo-engine-bridge",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ygo_state"]
+
+[tool.hatch.metadata]
+allow-direct-references = true

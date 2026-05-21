@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ygo-action"
+version = "0.1.0"
+description = "YGO Action MCP Server - move execution"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.0.0",
+    "pydantic>=2.0.0",
+    "ygo-engine-bridge",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ygo_action"]
+
+[tool.hatch.metadata]
+allow-direct-references = true

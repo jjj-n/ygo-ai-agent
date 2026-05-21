@@ -1,0 +1,32 @@
+{
+  "mcpServers": {
+    "ygo-state": {
+      "command": "python",
+      "args": ["-m", "ygo_state.server"],
+      "env": {
+        "YGOPRO_ENGINE_PATH": "libs\\ygopro-engine\\build\\ygopro-engine.exe"
+      }
+    },
+    "ygo-action": {
+      "command": "python",
+      "args": ["-m", "ygo_action.server"],
+      "env": {
+        "YGOPRO_ENGINE_PATH": "libs\\ygopro-engine\\build\\ygopro-engine.exe"
+      }
+    },
+    "ygo-analysis": {
+      "command": "python",
+      "args": ["-m", "ygo_analysis.server"],
+      "env": {
+        "YGOPRO_ENGINE_PATH": "libs\\ygopro-engine\\build\\ygopro-engine.exe"
+      }
+    },
+    "ygo-battle": {
+      "command": "python",
+      "args": ["-m", "ygo_battle.server"],
+      "env": {
+        "YGOPRO_ENGINE_PATH": "libs\\ygopro-engine\\build\\ygopro-engine.exe"
+      }
+    }
+  }
+}

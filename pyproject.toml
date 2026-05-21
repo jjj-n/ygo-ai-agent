@@ -1,0 +1,19 @@
+[project]
+name = "ygo-ai-agent"
+version = "0.1.0"
+description = "Yu-Gi-Oh! AI Agent System based on Claude Code + MCP + ygopro-core"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.0.0",
+    "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["packages/*/tests"]
+asyncio_mode = "auto"
