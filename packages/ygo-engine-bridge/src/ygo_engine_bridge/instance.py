@@ -186,6 +186,8 @@ class GameInstance:
         Handles:
         - select_place: auto-select first available zone
         - select_chain with count=0: auto-pass empty chain windows
+        - select_effectyn: auto-respond "no"
+        - select_yesno: auto-respond "no"
 
         Updates response dict in-place so the caller sees the final state.
         """
@@ -219,6 +221,12 @@ class GameInstance:
                         "location": loc,
                         "sequence": seq,
                     },
+                })
+            elif prompt_type in ("select_effectyn", "select_yesno"):
+                # Auto-respond "no" - safe for vanilla cards, correct default for auto_play
+                resp = self._engine.send_command({
+                    "cmd": "respond_chain",
+                    "action": "no",
                 })
             else:
                 break  # Prompt needs LLM decision
@@ -364,25 +372,36 @@ class GameInstance:
         if not self._state:
             self._state = GameState()
 
-        # Track game over
+        # Track game over and winner
         if data.get("game_over"):
             self._state.is_game_over = True
-            self._state.winner = data.get("winner", -1)
+        # Winner can be at top level (from cmd_do_move) or in events
+        if "winner" in data and data["winner"] >= 0:
+            self._state.winner = data["winner"]
+        else:
+            # Check events for MSG_WIN (type 5)
+            for ev in data.get("events", []):
+                if ev.get("type") == 5 and "winner" in ev:
+                    self._state.winner = ev["winner"]
+                    break
 
-        # Track current player and turn from next_moves
+        # Track turn/phase from events (MSG_NEW_TURN=40, MSG_NEW_PHASE=41)
+        for ev in data.get("events", []):
+            ev_type = ev.get("type")
+            if ev_type == 40:  # MSG_NEW_TURN
+                self._state.turn += 1
+                if "player" in ev:
+                    self._state.current_player = ev["player"] + 1
+            elif ev_type == 41:  # MSG_NEW_PHASE
+                pass  # Phase tracking from events is informational
+
+        # Also track current player from next_moves
         next_moves = data.get("next_moves", [])
         if next_moves:
             move = next_moves[0]
             player = move.get("player")
-            move_type = move.get("type")
-
             if player is not None:
                 self._state.current_player = player + 1  # engine uses 0-based
-
-                # Detect turn change: idlecmd for a different player
-                if move_type == "idlecmd" and player != self._last_idlecmd_player:
-                    self._state.turn += 1
-                    self._last_idlecmd_player = player
 
     def __enter__(self):
         return self

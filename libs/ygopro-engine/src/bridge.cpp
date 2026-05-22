@@ -147,7 +147,7 @@ void DuelBridge::add_card(uint8_t team, uint32_t code, uint32_t loc, uint32_t se
     info.team = team;
     info.duelist = 0;
     info.code = code;
-    info.con = 0;
+    info.con = team;  // Controller must match team
     info.loc = loc;
     info.seq = seq;
     info.pos = pos;

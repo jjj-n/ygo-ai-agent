@@ -30,6 +30,9 @@ private:
     // Cached messages from last process cycle (needed because get_messages() clears the buffer)
     std::vector<uint8_t> cached_messages_;
 
+    // Track the last prompt type for correct response encoding
+    uint8_t last_prompt_type_ = 0;
+
     // Helper: serialize game state to JSON
     json serialize_state();
 

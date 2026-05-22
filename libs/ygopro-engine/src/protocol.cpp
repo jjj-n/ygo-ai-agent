@@ -89,14 +89,20 @@ json ProtocolHandler::cmd_init(const json& params) {
         return {{"ok", false}, {"error", "start_failed"}, {"reason", "Failed to start duel"}};
     }
 
-    // Process initial steps until engine needs input
+    // Process initial steps until engine needs input, accumulating messages
+    std::vector<uint8_t> all_messages;
     int status = YGO::DUEL_STATUS_CONTINUE;
     while (status == YGO::DUEL_STATUS_CONTINUE) {
         status = bridge_.process();
+        auto msgs = bridge_.get_messages();
+        all_messages.insert(all_messages.end(), msgs.begin(), msgs.end());
     }
+    // Also get any remaining messages after final process
+    auto final_msgs = bridge_.get_messages();
+    all_messages.insert(all_messages.end(), final_msgs.begin(), final_msgs.end());
 
-    // Get messages after initial processing and cache them
-    cached_messages_ = bridge_.get_messages();
+    // Cache and parse all accumulated messages
+    cached_messages_ = std::move(all_messages);
     json events = parse_messages(cached_messages_);
 
     return {{"ok", true}, {"data", {{"status", status}, {"events", events}}}};
@@ -163,8 +169,11 @@ json ProtocolHandler::cmd_do_move(const json& params) {
         }
     } else if (move_type == "attack" || move_type == "attack_direct" || move_type == "to_m2" || move_type == "to_ep_battle") {
         // For SELECT_BATTLECMD: response is a 32-bit integer: (index << 16) | type
+        // type: 0=activate_chain, 1=attack, 2=to_m2, 3=to_ep
+        // Both attack and attack_direct use type=1; the engine determines direct attack
+        // availability based on game state and prompts the player if needed.
         static const std::map<std::string, uint32_t> battle_map = {
-            {"attack", 0}, {"attack_direct", 1}, {"to_m2", 2}, {"to_ep_battle", 3}
+            {"attack", 1}, {"attack_direct", 1}, {"to_m2", 2}, {"to_ep_battle", 3}
         };
         auto it = battle_map.find(move_type);
         if (it != battle_map.end()) {
@@ -313,6 +322,23 @@ json ProtocolHandler::cmd_do_move(const json& params) {
     result["next_moves"] = next_moves;
     result["game_over"] = (status == YGO::DUEL_STATUS_END);
 
+    // Extract winner from MSG_WIN events and track turn/phase
+    {
+        auto& st = bridge_.get_state_mut();
+        for (auto& ev : events) {
+            int ev_type = ev.value("type", 0);
+            if (ev_type == MSG_WIN) {
+                result["winner"] = ev.value("winner", -1);
+                st.winner = ev.value("winner", -1);
+            } else if (ev_type == MSG_NEW_TURN) {
+                st.turn++;
+                st.current_player = ev.value("player", 0);
+            } else if (ev_type == MSG_NEW_PHASE) {
+                st.phase = ev.value("phase", 0);
+            }
+        }
+    }
+
     // Debug: include raw message hex
     {
         std::string hex;
@@ -337,16 +363,18 @@ json ProtocolHandler::cmd_respond_chain(const json& params) {
 
     std::string action = params.value("action", "pass");
 
+    // Determine the correct response value based on the current prompt type
+    bool is_chain_prompt = (last_prompt_type_ == MSG_SELECT_CHAIN);
     std::vector<uint8_t> response;
-    // For SELECT_CHAIN: -1 (0xFFFFFFFF) to pass, 0+ to activate a chain
-    // For SELECT_EFFECTYN/YESNO: 1=yes, 0=no
     int32_t val;
     if (action == "activate" || action == "yes") {
         val = 1;
-    } else if (action == "pass" || action == "no") {
-        val = -1; // Pass for chain, will be 0 for yes/no (close enough - engine validates)
+    } else if (action == "pass") {
+        val = is_chain_prompt ? -1 : 0;  // -1 for chain pass, 0 for yes/no
+    } else if (action == "no") {
+        val = 0;  // 0 = no for effectyn/yesno
     } else {
-        val = 0;
+        val = is_chain_prompt ? -1 : 0;
     }
     uint32_t uval = static_cast<uint32_t>(val);
     response.push_back(uval & 0xFF);
@@ -439,7 +467,9 @@ json ProtocolHandler::parse_messages(const std::vector<uint8_t>& buf) {
                 event["count"] = count;
                 json cards = json::array();
                 for (uint32_t i = 0; i < count; i++) {
-                    cards.push_back(read_u32(buf, pos));
+                    uint32_t code = read_u32(buf, pos);
+                    read_u32(buf, pos);  // position (skip)
+                    cards.push_back(code);
                 }
                 event["cards"] = cards;
                 break;
@@ -514,8 +544,7 @@ json ProtocolHandler::parse_messages(const std::vector<uint8_t>& buf) {
                 }
                 break;
             }
-            // Selection prompts - these are always the last message in the buffer.
-            // We mark them as prompts and stop parsing (remaining bytes belong to the prompt).
+            // Selection prompts - mark as prompts and continue parsing
             case MSG_SELECT_IDLECMD:
             case MSG_SELECT_BATTLECMD:
             case MSG_SELECT_EFFECTYN:
@@ -533,9 +562,7 @@ json ProtocolHandler::parse_messages(const std::vector<uint8_t>& buf) {
             case MSG_SORT_CARD:
             case MSG_SORT_CHAIN: {
                 event["is_prompt"] = true;
-                events.push_back(event);
-                // Stop parsing - prompt data will be parsed by parse_legal_moves
-                return events;
+                break;
             }
             default: {
                 // Unknown message type - skip to next message
@@ -613,12 +640,13 @@ json ProtocolHandler::parse_legal_moves(const std::vector<uint8_t>& buf) {
             }
             case MSG_SELECT_BATTLECMD: {
                 uint8_t player = read_u8(buf, pos);
-                // attack: code(4)+ctrl(1)+loc(1)+seq(4) = 10 bytes each
-                uint32_t attack_count = read_u32(buf, pos);
-                for (uint32_t i = 0; i < attack_count; i++) { read_u32(buf, pos); read_u8(buf, pos); read_u8(buf, pos); read_u32(buf, pos); }
-                // activate: code(4)+ctrl(1)+loc(1)+seq(4)+desc(8)+mode(1) = 19 bytes each
+                // NOTE: ygopro-core writes activatable FIRST, then attackable
+                // activate: code(4)+ctrl(1)+loc(1)+seq(4)+desc(uint64=8)+mode(1) = 19 bytes each
                 uint32_t activate_count = read_u32(buf, pos);
                 for (uint32_t i = 0; i < activate_count; i++) { read_u32(buf, pos); read_u8(buf, pos); read_u8(buf, pos); read_u32(buf, pos); read_u32(buf, pos); read_u32(buf, pos); read_u8(buf, pos); }
+                // attack: code(4)+ctrl(1)+loc(1)+seq(uint8=1)+direct(uint8=1) = 8 bytes each
+                uint32_t attack_count = read_u32(buf, pos);
+                for (uint32_t i = 0; i < attack_count; i++) { read_u32(buf, pos); read_u8(buf, pos); read_u8(buf, pos); read_u8(buf, pos); read_u8(buf, pos); }
                 // to_m2, to_ep flags
                 uint8_t to_m2 = read_u8(buf, pos);
                 uint8_t to_ep = read_u8(buf, pos);
@@ -799,7 +827,7 @@ json ProtocolHandler::parse_legal_moves(const std::vector<uint8_t>& buf) {
             case MSG_DRAW: {
                 read_u8(buf, pos);
                 uint32_t cnt = read_u32(buf, pos);
-                for (uint32_t i = 0; i < cnt; i++) read_u32(buf, pos);
+                for (uint32_t i = 0; i < cnt; i++) { read_u32(buf, pos); read_u32(buf, pos); }  // code + position
                 break;
             }
             case MSG_MOVE: {
@@ -975,6 +1003,12 @@ json ProtocolHandler::parse_legal_moves(const std::vector<uint8_t>& buf) {
     }
 
     if (!last_prompt.is_null()) {
+        // Track the prompt type for correct response encoding in cmd_respond_chain
+        std::string prompt_type = last_prompt.value("type", "");
+        if (prompt_type == "select_chain") last_prompt_type_ = MSG_SELECT_CHAIN;
+        else if (prompt_type == "effectyn") last_prompt_type_ = MSG_SELECT_EFFECTYN;
+        else if (prompt_type == "yesno") last_prompt_type_ = MSG_SELECT_YESNO;
+        else last_prompt_type_ = 0;
         moves.push_back(last_prompt);
     }
 
@@ -988,6 +1022,9 @@ json ProtocolHandler::serialize_state() {
     result["started"] = state.started;
     result["finished"] = state.finished;
     result["winner"] = state.winner;
+    result["turn"] = state.turn;
+    result["current_player"] = state.current_player;
+    result["phase"] = state.phase;
     result["deck_count"] = {
         {"player1", static_cast<int>(state.deck[0].size())},
         {"player2", static_cast<int>(state.deck[1].size())}

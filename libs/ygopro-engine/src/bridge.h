@@ -48,6 +48,9 @@ struct DuelState {
     bool started = false;
     bool finished = false;
     int winner = -1;
+    int turn = 0;
+    int current_player = 0;  // 0-based
+    int phase = 0;
 };
 
 // Bridge class: wraps ocgcore API
@@ -69,6 +72,7 @@ public:
     bool load_script(const char* buf, uint32_t len, const char* name);
     void destroy_duel();
     const DuelState& get_state() const { return state_; }
+    DuelState& get_state_mut() { return state_; }
 
 private:
     DuelState state_;
