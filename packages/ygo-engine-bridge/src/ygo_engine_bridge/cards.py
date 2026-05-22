@@ -56,13 +56,17 @@ class CardDatabase:
         if not row:
             return None
 
-        # Get card text
-        cursor = self._conn.execute(
-            "SELECT * FROM texts WHERE id = ?", (card_id,)
-        )
-        text_row = cursor.fetchone()
+        # Get card text (texts table may not exist in test CDBs)
+        text_row = None
+        try:
+            cursor = self._conn.execute(
+                "SELECT * FROM texts WHERE id = ?", (card_id,)
+            )
+            text_row = cursor.fetchone()
+        except sqlite3.OperationalError:
+            pass
 
-        return {
+        result = {
             "id": row["id"],
             "alias": row["alias"],
             "type": row["type"],
@@ -71,7 +75,6 @@ class CardDatabase:
             "level": row["level"],
             "race": row["race"],
             "attribute": row["attribute"],
-            "category": row["category"],
             "name": text_row["name"] if text_row else "",
             "desc": text_row["desc"] if text_row else "",
             "str1": text_row["str1"] if text_row else "",
@@ -91,6 +94,7 @@ class CardDatabase:
             "str15": text_row["str15"] if text_row else "",
             "str16": text_row["str16"] if text_row else "",
         }
+        return result
 
     def get_card_as_model(self, card_id: int) -> Optional[Card]:
         """Get card as a Card model instance.
@@ -130,12 +134,23 @@ class CardDatabase:
         if not self._conn:
             self.connect()
 
-        cursor = self._conn.execute(
-            "SELECT d.id, t.name, d.type, d.atk, d.def, d.level "
-            "FROM datas d JOIN texts t ON d.id = t.id "
-            "WHERE t.name LIKE ? LIMIT ?",
-            (f"%{query}%", limit),
-        )
+        try:
+            cursor = self._conn.execute(
+                "SELECT d.id, t.name, d.type, d.atk, d.def, d.level "
+                "FROM datas d JOIN texts t ON d.id = t.id "
+                "WHERE t.name LIKE ? LIMIT ?",
+                (f"%{query}%", limit),
+            )
+        except sqlite3.OperationalError:
+            # texts table doesn't exist — search by ID only
+            try:
+                card_id = int(query)
+                cursor = self._conn.execute(
+                    "SELECT id, '' as name, type, atk, def, level FROM datas WHERE id = ?",
+                    (card_id,),
+                )
+            except ValueError:
+                return []
 
         return [
             {

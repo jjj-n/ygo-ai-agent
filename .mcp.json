@@ -4,7 +4,8 @@
       "command": "python",
       "args": ["-m", "ygo_mcp.server"],
       "env": {
-        "YGOPRO_ENGINE_PATH": "libs\\ygopro-engine\\build\\ygopro-engine.exe"
+        "YGOPRO_ENGINE_PATH": "libs\\ygopro-engine\\build\\ygopro-engine.exe",
+        "CARD_DB_PATH": "libs\\ygopro-engine\\build\\cards.cdb"
       }
     }
   }
