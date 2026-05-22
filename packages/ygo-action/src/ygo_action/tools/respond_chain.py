@@ -33,18 +33,14 @@ async def respond_chain(
         instance = GameInstance.get(game_id)
         result = instance.respond_chain(action, card_idx)
 
+        if not result.success:
+            return {
+                "success": False,
+                "error": result.error or "Chain response failed",
+            }
+
         return {
-            "success": result.success,
-            "events": [
-                {
-                    "type": e.event_type,
-                    "description": e.description,
-                    "player": e.player,
-                }
-                for e in result.events
-            ],
-            "state": result.new_state.to_llm_dict() if result.new_state else None,
-            "error": result.error,
+            "success": True,
         }
 
     except KeyError:

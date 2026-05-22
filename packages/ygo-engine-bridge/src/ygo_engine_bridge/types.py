@@ -52,21 +52,22 @@ class CardPosition(str, Enum):
 
 
 class MoveType(str, Enum):
+    # Engine command format (must match protocol.cpp type_map)
     SUMMON = "summon"
-    SPECIAL_SUMMON = "special_summon"
-    ACTIVATE_EFFECT = "activate_effect"
-    SET_SPELL = "set_spell"
-    SET_TRAP = "set_trap"
-    CHANGE_POSITION = "change_position"
-    TRIBUTE = "tribute"
-    FUSION = "fusion"
-    SYNCHRO = "synchro"
-    XYZ = "xyz"
-    LINK = "link"
-    PENDULUM = "pendulum"
-    DRAW = "draw"
-    PHASE_END = "phase_end"
+    SPSUMMON = "spsummon"
+    REPOSITION = "reposition"
+    MSET = "mset"
+    SSET = "sset"
+    ACTIVATE = "activate"
+    TO_BP = "to_bp"
+    TO_EP = "to_ep"
     ATTACK = "attack"
+    ATTACK_DIRECT = "attack_direct"
+    TO_M2 = "to_m2"
+    TO_EP_BATTLE = "to_ep_battle"
+    PLACE = "place"
+    SELECT_YES = "yes"
+    SELECT_NO = "no"
 
 
 class Zone(str, Enum):

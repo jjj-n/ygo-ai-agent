@@ -215,10 +215,20 @@ json ProtocolHandler::cmd_do_move(const json& params) {
         response.push_back((val >> 16) & 0xFF);
         response.push_back((val >> 24) & 0xFF);
     } else if (move_type == "place") {
-        // SELECT_PLACE: [player(uint8)] + [location(uint8)] + [sequence(uint8)]
-        response.push_back(static_cast<uint8_t>(move.value("player", 0)));
-        response.push_back(static_cast<uint8_t>(move.value("location", 0)));
-        response.push_back(static_cast<uint8_t>(move.value("sequence", 0)));
+        // SELECT_PLACE: [player(uint8)] + [location(uint8)] + [sequence(uint8)] repeated count times
+        // count comes from the SELECT_PLACE prompt (how many zones to select)
+        int count = move.value("count", 1);
+        int player = move.value("player", 0);
+        int location = move.value("location", 0);
+        int sequence = move.value("sequence", 0);
+        // If locations/sequences are provided as arrays, use them; otherwise repeat the single values
+        auto locations = move.value("locations", std::vector<int>{});
+        auto sequences = move.value("sequences", std::vector<int>{});
+        for (int i = 0; i < count; i++) {
+            response.push_back(static_cast<uint8_t>(player));
+            response.push_back(static_cast<uint8_t>(locations.empty() ? location : locations[i]));
+            response.push_back(static_cast<uint8_t>(sequences.empty() ? sequence : sequences[i]));
+        }
     } else if (move_type == "position") {
         // SELECT_POSITION: int32_t = position bitmask
         uint32_t val = static_cast<uint32_t>(move.value("position", 1));
@@ -266,14 +276,34 @@ json ProtocolHandler::cmd_do_move(const json& params) {
     // Send response to engine
     bridge_.set_response(response);
 
-    // Process until next AWAITING or END
+    // Process until next AWAITING or END, accumulating messages
+    std::vector<uint8_t> all_messages;
     int status = YGO::DUEL_STATUS_CONTINUE;
     while (status == YGO::DUEL_STATUS_CONTINUE) {
         status = bridge_.process();
+        auto msgs = bridge_.get_messages();
+        all_messages.insert(all_messages.end(), msgs.begin(), msgs.end());
     }
 
-    // Get new messages and cache them
-    cached_messages_ = bridge_.get_messages();
+    // Also get any remaining messages after final process
+    auto final_msgs = bridge_.get_messages();
+    all_messages.insert(all_messages.end(), final_msgs.begin(), final_msgs.end());
+
+    // Cache and parse all accumulated messages
+    cached_messages_ = std::move(all_messages);
+
+    // Check for MSG_RETRY (type 1) - engine rejected the response
+    if (cached_messages_.size() >= 5) {
+        uint32_t msg_size = 0;
+        memcpy(&msg_size, cached_messages_.data(), 4);
+        if (msg_size == 1 && cached_messages_.size() >= 5 && cached_messages_[4] == 1) {
+            // MSG_RETRY - re-read the prompt from engine
+            // The engine is still waiting for valid input, so re-fetch messages
+            cached_messages_ = bridge_.get_messages();
+            return {{"ok", false}, {"error", "retry"}, {"reason", "Engine rejected the move (MSG_RETRY). The move may be illegal."}};
+        }
+    }
+
     json events = parse_messages(cached_messages_);
     json next_moves = parse_legal_moves(cached_messages_);
 
@@ -282,6 +312,19 @@ json ProtocolHandler::cmd_do_move(const json& params) {
     result["events"] = events;
     result["next_moves"] = next_moves;
     result["game_over"] = (status == YGO::DUEL_STATUS_END);
+
+    // Debug: include raw message hex
+    {
+        std::string hex;
+        hex.reserve(cached_messages_.size() * 2);
+        for (uint8_t b : cached_messages_) {
+            char buf[3];
+            snprintf(buf, sizeof(buf), "%02x", b);
+            hex += buf;
+        }
+        result["debug_hex"] = hex;
+        result["debug_size"] = cached_messages_.size();
+    }
 
     return {{"ok", true}, {"data", result}};
 }
@@ -313,12 +356,17 @@ json ProtocolHandler::cmd_respond_chain(const json& params) {
 
     bridge_.set_response(response);
 
+    std::vector<uint8_t> all_messages;
     int status = YGO::DUEL_STATUS_CONTINUE;
     while (status == YGO::DUEL_STATUS_CONTINUE) {
         status = bridge_.process();
+        auto msgs = bridge_.get_messages();
+        all_messages.insert(all_messages.end(), msgs.begin(), msgs.end());
     }
+    auto final_msgs = bridge_.get_messages();
+    all_messages.insert(all_messages.end(), final_msgs.begin(), final_msgs.end());
 
-    cached_messages_ = bridge_.get_messages();
+    cached_messages_ = std::move(all_messages);
     json events = parse_messages(cached_messages_);
     json next_moves = parse_legal_moves(cached_messages_);
 
@@ -670,10 +718,10 @@ json ProtocolHandler::parse_legal_moves(const std::vector<uint8_t>& buf) {
             case MSG_SELECT_PLACE:
             case MSG_SELECT_DISFIELD: {
                 uint8_t player = read_u8(buf, pos);
-                uint32_t count = read_u32(buf, pos);
-                last_prompt = {{"type", "select_place"}, {"player", player}, {"count", count}};
+                uint8_t count = read_u8(buf, pos);
+                uint32_t flag = read_u32(buf, pos);
+                last_prompt = {{"type", "select_place"}, {"player", player}, {"count", count}, {"flag", flag}};
                 last_prompt_pos = msg_start;
-                for (uint32_t i = 0; i < count; i++) read_u32(buf, pos);
                 break;
             }
             case MSG_SELECT_POSITION: {

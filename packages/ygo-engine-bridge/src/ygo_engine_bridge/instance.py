@@ -23,6 +23,7 @@ class GameInstance:
         self._engine = engine
         self._state: Optional[GameState] = None
         self._initialized = False
+        self._last_idlecmd_player: int = 0
 
     @classmethod
     def create(
@@ -72,7 +73,7 @@ class GameInstance:
             raise RuntimeError(f"Failed to initialize duel: {response.get('reason')}")
 
         instance._initialized = True
-        instance._state = GameState()
+        instance._state = GameState(turn=1, current_player=1)
         return instance
 
     @classmethod
@@ -138,7 +139,129 @@ class GameInstance:
         if not response.get("ok"):
             raise RuntimeError(f"Failed to get legal moves: {response.get('reason')}")
 
-        return response.get("data", {}).get("moves", [])
+        moves = response.get("data", {}).get("moves", [])
+
+        # Track state from moves (idlecmd tells us whose turn it is)
+        if moves:
+            move = moves[0]
+            player = move.get("player")
+            move_type = move.get("type")
+            if player is not None:
+                self._state.current_player = player + 1
+                if move_type == "idlecmd" and player != self._last_idlecmd_player:
+                    self._state.turn += 1
+                    self._last_idlecmd_player = player
+
+        return moves
+
+    def do_move_raw(self, move: dict) -> dict:
+        """Execute a move from a raw dict (pass-through to engine).
+
+        Args:
+            move: Move dict with 'type' and parameters, e.g.
+                  {"type": "summon", "index": 0}
+                  {"type": "sset", "index": 0}
+                  {"type": "to_ep"}
+
+        Returns:
+            Engine response dict
+        """
+        if not self._initialized:
+            raise RuntimeError("Game not initialized")
+
+        response = self._engine.send_command({
+            "cmd": "do_move",
+            "move": move,
+        })
+
+        if response.get("ok"):
+            self._track_state(response.get("data", {}))
+            self._auto_handle_prompts(response)
+
+        return response
+
+    def _auto_handle_prompts(self, response: dict):
+        """Auto-handle prompts that don't need LLM decisions.
+
+        Handles:
+        - select_place: auto-select first available zone
+        - select_chain with count=0: auto-pass empty chain windows
+
+        Updates response dict in-place so the caller sees the final state.
+        """
+        data = response.get("data", {})
+        next_moves = data.get("next_moves", [])
+
+        while next_moves:
+            prompt = next_moves[0]
+            prompt_type = prompt.get("type")
+
+            if prompt_type == "select_chain":
+                chain_count = prompt.get("count", 0)
+                if chain_count > 0:
+                    break  # Has real chains - let the caller decide
+                resp = self._engine.send_command({
+                    "cmd": "respond_chain",
+                    "action": "pass",
+                })
+            elif prompt_type == "select_place":
+                # Auto-select first available zone from flag bitmask
+                flag = prompt.get("flag", 0)
+                player = prompt.get("player", 0)
+                count = prompt.get("count", 1)
+                loc, seq = self._pick_first_zone(flag)
+                resp = self._engine.send_command({
+                    "cmd": "do_move",
+                    "move": {
+                        "type": "place",
+                        "player": player,
+                        "count": count,
+                        "location": loc,
+                        "sequence": seq,
+                    },
+                })
+            else:
+                break  # Prompt needs LLM decision
+
+            if not resp.get("ok"):
+                break
+            resp_data = resp.get("data", {})
+            self._track_state(resp_data)
+            next_moves = resp_data.get("next_moves", [])
+
+        data["next_moves"] = next_moves
+
+    @staticmethod
+    def _pick_first_zone(flag: int) -> tuple[int, int]:
+        """Pick the first available zone from a SELECT_PLACE flag bitmask.
+
+        Flag layout (32-bit):
+          bits 0-6:   player 0 MZONE (0-6)
+          bits 8-15:  player 0 SZONE (0-7)
+          bits 16-22: player 1 MZONE (0-6)
+          bits 24-31: player 1 SZONE (0-7)
+
+        Returns (location, sequence) where location is 4 (MZONE) or 8 (SZONE).
+        """
+        LOCATION_MZONE = 4
+        LOCATION_SZONE = 8
+        # Try player 0 MZONE first
+        for seq in range(7):
+            if not (flag & (1 << seq)):
+                return (LOCATION_MZONE, seq)
+        # Player 0 SZONE
+        for seq in range(8):
+            if not (flag & (1 << (seq + 8))):
+                return (LOCATION_SZONE, seq)
+        # Player 1 MZONE
+        for seq in range(7):
+            if not (flag & (1 << (seq + 16))):
+                return (LOCATION_MZONE, seq)
+        # Player 1 SZONE
+        for seq in range(8):
+            if not (flag & (1 << (seq + 24))):
+                return (LOCATION_SZONE, seq)
+        return (LOCATION_MZONE, 0)  # fallback
 
     def do_move(self, move: Move) -> MoveResult:
         """Execute a move.
@@ -202,7 +325,7 @@ class GameInstance:
             return MoveResult(success=False, error=response.get("reason"))
 
         data = response.get("data", {})
-        self._update_state(data.get("state", {}))
+        self._track_state(data)
 
         return MoveResult(success=True, new_state=self._state)
 
@@ -231,6 +354,35 @@ class GameInstance:
             self._state.is_game_over = data["is_game_over"]
         if "winner" in data:
             self._state.winner = data.get("winner", -1)
+
+    def _track_state(self, data: dict):
+        """Track turn/phase/player from do_move/respond_chain response data.
+
+        Detects turn transitions by watching for idlecmd prompts with
+        a different player than the previous idlecmd.
+        """
+        if not self._state:
+            self._state = GameState()
+
+        # Track game over
+        if data.get("game_over"):
+            self._state.is_game_over = True
+            self._state.winner = data.get("winner", -1)
+
+        # Track current player and turn from next_moves
+        next_moves = data.get("next_moves", [])
+        if next_moves:
+            move = next_moves[0]
+            player = move.get("player")
+            move_type = move.get("type")
+
+            if player is not None:
+                self._state.current_player = player + 1  # engine uses 0-based
+
+                # Detect turn change: idlecmd for a different player
+                if move_type == "idlecmd" and player != self._last_idlecmd_player:
+                    self._state.turn += 1
+                    self._last_idlecmd_player = player
 
     def __enter__(self):
         return self
