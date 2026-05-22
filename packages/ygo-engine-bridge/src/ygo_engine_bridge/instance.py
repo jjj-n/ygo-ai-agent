@@ -38,11 +38,24 @@ _POSITION_NAMES = {
 }
 
 
-def _format_card(card_data: dict) -> dict:
-    """Transform raw engine card data into LLM-friendly format."""
+def _format_card(card_data: dict, zone: str = "") -> dict:
+    """Transform raw engine card data into LLM-friendly format.
+
+    Args:
+        card_data: Raw card data from engine query
+        zone: Zone context ("monster", "spell_trap", "hand", etc.)
+              Used to correctly interpret position values.
+    """
     code = card_data.get("code", 0)
     pos = card_data.get("position", 0)
     card_type = card_data.get("type", 0)
+
+    # Engine returns pos=0xa for set spell/trap cards (same as in_hand).
+    # Use zone context to disambiguate.
+    if zone == "spell_trap" and pos == 0xa:
+        pos = 0x8  # Treat as facedown_defense (set)
+    elif zone == "monster" and pos == 0xa:
+        pos = 0x8  # Facedown defense position
 
     result = {
         "code": code,
@@ -71,11 +84,11 @@ def _format_card(card_data: dict) -> dict:
     return result
 
 
-def _format_zone(cards: list, hide: bool = False) -> list | dict:
+def _format_zone(cards: list, hide: bool = False, zone: str = "") -> list | dict:
     """Format a list of cards for a zone."""
     if hide:
         return {"count": len(cards), "cards": "hidden"}
-    return [_format_card(c) for c in cards]
+    return [_format_card(c, zone=zone) for c in cards]
 
 
 class GameInstance:
@@ -93,6 +106,10 @@ class GameInstance:
         self._state: Optional[GameState] = None
         self._initialized = False
         self._last_idlecmd_player: int = 0
+        self._move_history: list[dict] = []
+        self._deck_p1: list[int] = []
+        self._deck_p2: list[int] = []
+        self._seed: int = 0
 
     @classmethod
     def create(
@@ -128,6 +145,11 @@ class GameInstance:
 
         instance = cls(game_id, engine)
         cls._registry[game_id] = instance
+
+        # Store creation params for cloning
+        instance._deck_p1 = list(deck_p1)
+        instance._deck_p2 = list(deck_p2)
+        instance._seed = seed
 
         # Initialize the duel
         response = engine.send_command({
@@ -208,12 +230,12 @@ class GameInstance:
             pcounts = counts.get(pkey, {})
             return {
                 "lp": lp.get(pkey, 8000),
-                "monster_zones": _format_zone(pzones.get("monster", [])),
-                "spell_trap_zones": _format_zone(pzones.get("spell_trap", [])),
+                "monster_zones": _format_zone(pzones.get("monster", []), zone="monster"),
+                "spell_trap_zones": _format_zone(pzones.get("spell_trap", []), zone="spell_trap"),
                 "field_spell": None,  # TODO: field spell zone
-                "hand": _format_zone(pzones.get("hand", []), hide=hide_hand),
-                "graveyard": _format_zone(pzones.get("graveyard", [])),
-                "banished": _format_zone(pzones.get("banished", [])),
+                "hand": _format_zone(pzones.get("hand", []), hide=hide_hand, zone="hand"),
+                "graveyard": _format_zone(pzones.get("graveyard", []), zone="graveyard"),
+                "banished": _format_zone(pzones.get("banished", []), zone="banished"),
                 "deck_count": pcounts.get("deck", 0),
                 "extra_deck_count": pcounts.get("extra", 0),
             }
@@ -279,6 +301,7 @@ class GameInstance:
         })
 
         if response.get("ok"):
+            self._move_history.append({"cmd": "do_move", "move": move})
             self._track_state(response.get("data", {}))
             self._auto_handle_prompts(response)
 
@@ -306,32 +329,29 @@ class GameInstance:
                 chain_count = prompt.get("count", 0)
                 if chain_count > 0:
                     break  # Has real chains - let the caller decide
-                resp = self._engine.send_command({
-                    "cmd": "respond_chain",
-                    "action": "pass",
-                })
+                cmd = {"cmd": "respond_chain", "action": "pass"}
+                resp = self._engine.send_command(cmd)
+                self._move_history.append(cmd)
             elif prompt_type == "select_place":
                 # Auto-select first available zone from flag bitmask
                 flag = prompt.get("flag", 0)
                 player = prompt.get("player", 0)
                 count = prompt.get("count", 1)
                 loc, seq = self._pick_first_zone(flag)
-                resp = self._engine.send_command({
-                    "cmd": "do_move",
-                    "move": {
-                        "type": "place",
-                        "player": player,
-                        "count": count,
-                        "location": loc,
-                        "sequence": seq,
-                    },
-                })
+                cmd = {"cmd": "do_move", "move": {
+                    "type": "place",
+                    "player": player,
+                    "count": count,
+                    "location": loc,
+                    "sequence": seq,
+                }}
+                resp = self._engine.send_command(cmd)
+                self._move_history.append(cmd)
             elif prompt_type in ("select_effectyn", "select_yesno"):
                 # Auto-respond "no" - safe for vanilla cards, correct default for auto_play
-                resp = self._engine.send_command({
-                    "cmd": "respond_chain",
-                    "action": "no",
-                })
+                cmd = {"cmd": "respond_chain", "action": "no"}
+                resp = self._engine.send_command(cmd)
+                self._move_history.append(cmd)
             else:
                 break  # Prompt needs LLM decision
 
@@ -427,15 +447,13 @@ class GameInstance:
         Returns:
             MoveResult
         """
-        response = self._engine.send_command({
-            "cmd": "respond_chain",
-            "action": action,
-            "card_idx": card_idx,
-        })
+        cmd = {"cmd": "respond_chain", "action": action, "card_idx": card_idx}
+        response = self._engine.send_command(cmd)
 
         if not response.get("ok"):
             return MoveResult(success=False, error=response.get("reason"))
 
+        self._move_history.append(cmd)
         data = response.get("data", {})
         self._track_state(data)
 
@@ -446,6 +464,51 @@ class GameInstance:
         self._engine.stop()
         if self.game_id in self._registry:
             del self._registry[self.game_id]
+
+    def clone(self) -> "GameInstance":
+        """Create a sandboxed clone of this game instance.
+
+        Spawns a fresh engine with the same decks/seed and replays
+        all moves to reproduce the current state. The clone is NOT
+        registered in _registry — call .close() when done.
+
+        Returns:
+            A new GameInstance at the same game state.
+        """
+        clone_id = f"{self.game_id}_clone"
+        engine = EngineProcess()
+        engine.start(
+            str(_DEFAULT_CARD_DB),
+            str(_DEFAULT_SCRIPTS),
+        )
+
+        clone = GameInstance(clone_id, engine)
+        clone._deck_p1 = list(self._deck_p1)
+        clone._deck_p2 = list(self._deck_p2)
+        clone._seed = self._seed
+
+        # Initialize with same params
+        response = engine.send_command({
+            "cmd": "init",
+            "deck_p1": self._deck_p1,
+            "deck_p2": self._deck_p2,
+            "seed": self._seed,
+        })
+        if not response.get("ok"):
+            engine.stop()
+            raise RuntimeError(f"Clone init failed: {response.get('reason')}")
+
+        clone._initialized = True
+        clone._state = GameState(turn=1, current_player=1)
+
+        # Replay all moves (commands already include auto-handled prompts)
+        for recorded in self._move_history:
+            resp = engine.send_command(recorded)
+            if not resp.get("ok"):
+                break  # Stop replaying if a move fails (state diverged)
+            clone._track_state(resp.get("data", {}))
+
+        return clone
 
     def _update_state(self, data: dict):
         """Update internal state from engine response data."""

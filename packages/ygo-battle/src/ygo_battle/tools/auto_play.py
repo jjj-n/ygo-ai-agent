@@ -131,9 +131,64 @@ def _pick_move_control(moves: list[dict], player: int) -> dict | None:
     return {"type": "to_ep"}
 
 
+def _pick_move_combo(moves: list[dict], player: int) -> dict | None:
+    """Combo: spsummon > activate > summon > sset > mset > to_bp > attack > end.
+
+    Prioritizes building board presence through special summons and effect
+    activations, then goes for lethal damage in the battle phase.
+    """
+    if not moves:
+        return None
+
+    prompt = _handle_prompts(moves)
+    if prompt:
+        return prompt
+
+    idlecmd = None
+    battlecmd = None
+
+    for m in moves:
+        t = m.get("type")
+        if t == "idlecmd":
+            idlecmd = m
+        elif t == "battlecmd":
+            battlecmd = m
+
+    # Battle phase: always attack
+    if battlecmd:
+        if battlecmd.get("attack_count", 0) > 0:
+            return {"type": "attack", "index": 0}
+        if battlecmd.get("activate_count", 0) > 0:
+            return {"type": "activate", "index": 0}
+        if battlecmd.get("to_m2", 0):
+            return {"type": "to_m2"}
+        if battlecmd.get("to_ep", 0):
+            return {"type": "to_ep_battle"}
+
+    # Main phase: spsummon > activate > summon > set > battle > end
+    if idlecmd:
+        if idlecmd.get("spsummon_count", 0) > 0:
+            return {"type": "spsummon", "index": 0}
+        if idlecmd.get("activate_count", 0) > 0:
+            return {"type": "activate", "index": 0}
+        if idlecmd.get("summon_count", 0) > 0:
+            return {"type": "summon", "index": 0}
+        if idlecmd.get("sset_count", 0) > 0:
+            return {"type": "sset", "index": 0}
+        if idlecmd.get("mset_count", 0) > 0:
+            return {"type": "mset", "index": 0}
+        if idlecmd.get("to_bp", 0):
+            return {"type": "to_bp"}
+        if idlecmd.get("to_ep", 0):
+            return {"type": "to_ep"}
+
+    return {"type": "to_ep"}
+
+
 _STRATEGIES = {
     "aggressive": _pick_move_aggressive,
     "control": _pick_move_control,
+    "combo": _pick_move_combo,
 }
 
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 from typing import Optional
-from ygo_engine_bridge import GameInstance, Move, MoveType, Zone
+from ygo_engine_bridge import GameInstance
 
 
 async def simulate_move(
@@ -35,52 +35,42 @@ async def simulate_move(
     Returns:
         模拟结果，包含模拟后的状态
     """
+    clone = None
     try:
         instance = GameInstance.get(game_id)
 
-        # Parse move type
-        try:
-            mt = MoveType(move_type)
-        except ValueError:
-            return {
-                "success": False,
-                "error": f"Invalid move type: {move_type}",
-            }
-
-        # Parse zones
-        sz = Zone(source_zone) if source_zone else None
-        tz = Zone(target_zone) if target_zone else None
-
-        # Create move
-        move = Move(
-            move_type=mt,
-            player=player,
-            source_zone=sz,
-            source_idx=source_idx,
-            target_zone=tz,
-            target_idx=target_idx,
-            materials=materials,
-        )
-
-        # Get current state before simulation
+        # Get state before simulation
         current_state = instance.get_state(player_pov=player)
 
-        # Execute the move (this will modify the actual state)
-        # In a full implementation, we would clone the game state first
-        result = instance.do_move(move)
+        # Build move dict
+        move = {"type": move_type, "player": player}
+        if source_zone:
+            move["source"] = source_zone
+        if source_idx is not None:
+            move["source_idx"] = source_idx
+        if target_zone:
+            move["target"] = target_zone
+        if target_idx is not None:
+            move["target_idx"] = target_idx
+        if materials:
+            move["materials"] = materials
 
-        if not result.success:
+        # Create sandboxed clone
+        clone = instance.clone()
+
+        # Execute on clone (does not affect real instance)
+        result = clone.do_move_raw(move)
+
+        if not result.get("ok"):
             return {
                 "success": False,
-                "error": result.error or "Move execution failed",
+                "error": result.get("reason", "Move execution failed"),
                 "current_state": current_state,
             }
 
-        # Get the new state
-        new_state = instance.get_state(player_pov=player)
+        # Get new state from clone
+        new_state = clone.get_state(player_pov=player)
 
-        # If depth > 1, we would simulate opponent responses here
-        # For now, just return the direct result
         simulation_result = {
             "success": True,
             "move": {
@@ -91,22 +81,10 @@ async def simulate_move(
             },
             "state_before": current_state,
             "state_after": new_state,
-            "events": [
-                {
-                    "type": e.event_type,
-                    "description": e.description,
-                    "player": e.player,
-                }
-                for e in result.events
-            ],
             "depth": depth,
         }
 
-        # Note: In a full implementation, we would:
-        # 1. Clone the game state
-        # 2. Execute the move on the clone
-        # 3. If depth > 1, simulate opponent responses
-        # 4. Return the simulated results without modifying the actual game
+        # TODO: If depth > 1, simulate opponent responses on a sub-clone
 
         return simulation_result
 
@@ -120,3 +98,6 @@ async def simulate_move(
             "success": False,
             "error": str(e),
         }
+    finally:
+        if clone is not None:
+            clone.close()
