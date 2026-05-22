@@ -1044,10 +1044,10 @@ json ProtocolHandler::serialize_state() {
         for (int p = 0; p < 2; p++) {
             std::string key = "player" + std::to_string(p + 1);
             if (pos + 4 > field_data.size()) break;
-            uint32_t player_lp;
+            int32_t player_lp;
             memcpy(&player_lp, field_data.data() + pos, 4);
             pos += 4;
-            lp[key] = player_lp;
+            lp[key] = std::max(0, player_lp);
 
             for (int z = 0; z < 7; z++) {
                 if (pos >= field_data.size()) break;
