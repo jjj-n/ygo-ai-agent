@@ -8,6 +8,75 @@ from .process import EngineProcess, _DEFAULT_CARD_DB, _DEFAULT_SCRIPTS
 from .state import GameState, Move, MoveResult, GameEvent, Card, PlayerState, FieldZone, ChainState
 from .types import Phase, MoveType, DUEL_STATUS_AWAITING, DUEL_STATUS_END, DUEL_STATUS_CONTINUE
 
+# --- LLM-friendly name mappings ---
+
+_PHASE_NAMES = {
+    0x1: "draw", 0x2: "standby", 0x4: "main_phase_1",
+    0x8: "battle_start", 0x10: "battle_step", 0x20: "damage",
+    0x40: "damage_cal", 0x80: "main_phase_2", 0x100: "end",
+}
+
+_ATTRIBUTE_NAMES = {
+    0x1: "EARTH", 0x2: "WATER", 0x4: "FIRE", 0x8: "WIND",
+    0x10: "LIGHT", 0x20: "DARK", 0x40: "DIVINE",
+}
+
+_RACE_NAMES = {
+    0x1: "WARRIOR", 0x2: "SPELLCASTER", 0x4: "FAIRY", 0x8: "FIEND",
+    0x10: "ZOMBIE", 0x20: "MACHINE", 0x40: "AQUA", 0x80: "PYRO",
+    0x100: "ROCK", 0x200: "WINGEDBEAST", 0x400: "PLANT", 0x800: "INSECT",
+    0x1000: "THUNDER", 0x2000: "DRAGON", 0x4000: "BEAST", 0x8000: "BEASTWARRIOR",
+    0x10000: "DINOSAUR", 0x20000: "FISH", 0x40000: "SEASERPENT", 0x80000: "REPTILE",
+    0x100000: "PSYCHIC", 0x200000: "DIVINEBEAST", 0x400000: "CREATORGOD",
+    0x800000: "WYRM", 0x1000000: "CYBERSE", 0x2000000: "ILLUSION",
+}
+
+_POSITION_NAMES = {
+    0x1: "faceup_attack", 0x2: "facedown_attack",
+    0x4: "faceup_defense", 0x8: "facedown_defense",
+    0xa: "in_hand",  # hand cards (ygopro uses 0xa)
+}
+
+
+def _format_card(card_data: dict) -> dict:
+    """Transform raw engine card data into LLM-friendly format."""
+    code = card_data.get("code", 0)
+    pos = card_data.get("position", 0)
+    card_type = card_data.get("type", 0)
+
+    result = {
+        "code": code,
+        "position": _POSITION_NAMES.get(pos, f"unknown(0x{pos:x})"),
+        "is_faceup": bool(pos & 0x15) or pos == 0xa,  # faceup positions + hand
+    }
+
+    # Monster card (type & 0x1)
+    if card_type & 0x1:
+        result["atk"] = card_data.get("atk", 0)
+        result["def"] = card_data.get("def", 0)
+        result["level"] = card_data.get("level", 0)
+        attr = card_data.get("attribute", 0)
+        race = card_data.get("race", 0)
+        if attr:
+            result["attribute"] = _ATTRIBUTE_NAMES.get(attr, f"0x{attr:x}")
+        if race:
+            result["race"] = _RACE_NAMES.get(race, f"0x{race:x}")
+
+    # Spell/Trap
+    if card_type & 0x2:
+        result["card_type"] = "spell"
+    elif card_type & 0x4:
+        result["card_type"] = "trap"
+
+    return result
+
+
+def _format_zone(cards: list, hide: bool = False) -> list | dict:
+    """Format a list of cards for a zone."""
+    if hide:
+        return {"count": len(cards), "cards": "hidden"}
+    return [_format_card(c) for c in cards]
+
 
 class GameInstance:
     """A game instance wrapping a ygopro-engine subprocess.
@@ -106,7 +175,7 @@ class GameInstance:
             include_hidden: Whether to include opponent's hidden info
 
         Returns:
-            Game state dictionary
+            Game state dictionary with card names, attributes, positions, etc.
         """
         if not self._initialized:
             raise RuntimeError("Game not initialized")
@@ -119,11 +188,46 @@ class GameInstance:
         if not response.get("ok"):
             raise RuntimeError(f"Failed to get state: {response.get('reason')}")
 
-        # Update internal state from response
-        self._update_state(response.get("data", {}))
+        data = response.get("data", {})
 
-        # Return LLM-friendly format
-        return self._state.to_llm_dict(player_pov, include_hidden)
+        # Update internal tracking state
+        self._update_state(data)
+
+        # Transform into LLM-friendly format
+        my_key = f"player{player_pov}"
+        opp_key = f"player{2 if player_pov == 1 else 1}"
+
+        lp = data.get("lp", {})
+        counts = data.get("counts", {})
+        zones = data.get("zones", {})
+        phase_raw = data.get("phase", 0) or 0x4  # default to main_phase_1 if 0
+        current_player = data.get("current_player", 0)
+
+        def build_player_state(pkey: str, hide_hand: bool) -> dict:
+            pzones = zones.get(pkey, {})
+            pcounts = counts.get(pkey, {})
+            return {
+                "lp": lp.get(pkey, 8000),
+                "monster_zones": _format_zone(pzones.get("monster", [])),
+                "spell_trap_zones": _format_zone(pzones.get("spell_trap", [])),
+                "field_spell": None,  # TODO: field spell zone
+                "hand": _format_zone(pzones.get("hand", []), hide=hide_hand),
+                "graveyard": _format_zone(pzones.get("graveyard", [])),
+                "banished": _format_zone(pzones.get("banished", [])),
+                "deck_count": pcounts.get("deck", 0),
+                "extra_deck_count": pcounts.get("extra", 0),
+            }
+
+        return {
+            "turn": data.get("turn", 0),
+            "phase": _PHASE_NAMES.get(phase_raw, f"unknown(0x{phase_raw:x})"),
+            "current_player": current_player + 1,  # engine 0-based → 1-based
+            "is_game_over": data.get("finished", False),
+            "winner": data.get("winner", -1) if data.get("finished") else None,
+            "player": build_player_state(my_key, hide_hand=False),
+            "opponent": build_player_state(opp_key, hide_hand=not include_hidden),
+            "chain": {"active": False},  # TODO: chain state from engine
+        }
 
     def get_legal_moves(self) -> list[dict]:
         """Get all legal moves in the current position.

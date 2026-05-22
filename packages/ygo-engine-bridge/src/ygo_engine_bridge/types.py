@@ -135,6 +135,7 @@ POS_FACEUP_ATTACK = 0x1
 POS_FACEDOWN_ATTACK = 0x2
 POS_FACEUP_DEFENSE = 0x4
 POS_FACEDOWN_DEFENSE = 0x8
+POS_IN_HAND = 0xa  # Hand card position (ygopro internal)
 
 # Duel status
 DUEL_STATUS_END = 0

@@ -1034,15 +1034,129 @@ json ProtocolHandler::serialize_state() {
         {"player2", static_cast<int>(state.extra[1].size())}
     };
 
-    // Use cached messages (don't consume the buffer)
-    json events = parse_messages(cached_messages_);
-    result["events"] = events;
-
-    // Query field for detailed state
+    // Query field for LP and zone occupancy
     auto field_data = bridge_.query_field();
-    if (!field_data.empty()) {
-        result["field_raw"] = serialize_query_data(field_data);
+    if (!field_data.empty() && field_data.size() >= 8) {
+        size_t pos = 4; // skip duel_options
+        json lp = json::object();
+        json counts = json::object();
+
+        for (int p = 0; p < 2; p++) {
+            std::string key = "player" + std::to_string(p + 1);
+            if (pos + 4 > field_data.size()) break;
+            uint32_t player_lp;
+            memcpy(&player_lp, field_data.data() + pos, 4);
+            pos += 4;
+            lp[key] = player_lp;
+
+            for (int z = 0; z < 7; z++) {
+                if (pos >= field_data.size()) break;
+                uint8_t has_card = field_data[pos++];
+                if (has_card) pos += 5;
+            }
+            for (int z = 0; z < 8; z++) {
+                if (pos >= field_data.size()) break;
+                uint8_t has_card = field_data[pos++];
+                if (has_card) pos += 5;
+            }
+
+            if (pos + 24 > field_data.size()) break;
+            uint32_t main_c, hand_c, grave_c, remove_c, extra_c, extra_p;
+            memcpy(&main_c, field_data.data() + pos, 4); pos += 4;
+            memcpy(&hand_c, field_data.data() + pos, 4); pos += 4;
+            memcpy(&grave_c, field_data.data() + pos, 4); pos += 4;
+            memcpy(&remove_c, field_data.data() + pos, 4); pos += 4;
+            memcpy(&extra_c, field_data.data() + pos, 4); pos += 4;
+            memcpy(&extra_p, field_data.data() + pos, 4); pos += 4;
+
+            counts[key] = {{"deck", main_c}, {"hand", hand_c}, {"graveyard", grave_c},
+                           {"banished", remove_c}, {"extra", extra_c}, {"extra_pendulum", extra_p}};
+        }
+        result["lp"] = lp;
+        result["counts"] = counts;
     }
+
+    // Query detailed card info for each zone
+    constexpr uint32_t QF = QUERY_CODE | QUERY_POSITION | QUERY_TYPE |
+                             QUERY_LEVEL | QUERY_ATTRIBUTE | QUERY_RACE |
+                             QUERY_ATTACK | QUERY_DEFENSE;
+
+    json zones = json::object();
+    const char* loc_names[] = {"monster", "spell_trap", "graveyard", "banished", "extra", "hand", "deck"};
+    const uint32_t loc_ids[] = {LOCATION_MZONE, LOCATION_SZONE, LOCATION_GRAVE,
+                                 LOCATION_REMOVED, LOCATION_EXTRA, LOCATION_HAND, LOCATION_DECK};
+
+    for (int p = 0; p < 2; p++) {
+        std::string pkey = "player" + std::to_string(p + 1);
+        json player_zones = json::object();
+
+        for (int l = 0; l < 7; l++) {
+            auto loc_data = bridge_.query_location(static_cast<uint8_t>(p), loc_ids[l], QF);
+            if (loc_data.size() <= 4) {
+                player_zones[loc_names[l]] = json::array();
+                continue;
+            }
+
+            // Parse all fields into a flat list, then split into cards at QUERY_CODE boundaries
+            struct FieldEntry { uint32_t flag; std::vector<uint8_t> value; };
+            std::vector<FieldEntry> all_fields;
+            size_t qpos = 4; // skip size prefix
+
+            while (qpos + 6 <= loc_data.size()) {
+                uint16_t field_size;
+                memcpy(&field_size, loc_data.data() + qpos, 2);
+                if (field_size < 4 || qpos + 2 + field_size > loc_data.size()) break;
+
+                uint32_t flag;
+                memcpy(&flag, loc_data.data() + qpos + 2, 4);
+                uint32_t value_size = field_size - 4;
+
+                FieldEntry entry;
+                entry.flag = flag;
+                if (value_size > 0 && qpos + 6 + value_size <= loc_data.size()) {
+                    entry.value.assign(loc_data.data() + qpos + 6, loc_data.data() + qpos + 6 + value_size);
+                }
+                all_fields.push_back(std::move(entry));
+                qpos += 2 + field_size;
+            }
+
+            // Split into cards at QUERY_CODE boundaries
+            json cards = json::array();
+            json current_card;
+            for (const auto& field : all_fields) {
+                if (field.flag == QUERY_CODE && current_card.contains("code")) {
+                    cards.push_back(current_card);
+                    current_card = json::object();
+                }
+
+                if (field.flag == QUERY_CODE && field.value.size() >= 4) {
+                    uint32_t code; memcpy(&code, field.value.data(), 4); current_card["code"] = code;
+                } else if (field.flag == QUERY_POSITION && field.value.size() >= 4) {
+                    uint32_t position; memcpy(&position, field.value.data(), 4); current_card["position"] = position;
+                } else if (field.flag == QUERY_TYPE && field.value.size() >= 4) {
+                    uint32_t type; memcpy(&type, field.value.data(), 4); current_card["type"] = type;
+                } else if (field.flag == QUERY_LEVEL && field.value.size() >= 4) {
+                    uint32_t level; memcpy(&level, field.value.data(), 4); current_card["level"] = level;
+                } else if (field.flag == QUERY_ATTRIBUTE && field.value.size() >= 4) {
+                    uint32_t attr; memcpy(&attr, field.value.data(), 4); current_card["attribute"] = attr;
+                } else if (field.flag == QUERY_RACE && field.value.size() >= 8) {
+                    uint64_t race; memcpy(&race, field.value.data(), 8); current_card["race"] = race;
+                } else if (field.flag == QUERY_ATTACK && field.value.size() >= 4) {
+                    int32_t atk; memcpy(&atk, field.value.data(), 4); current_card["atk"] = atk;
+                } else if (field.flag == QUERY_DEFENSE && field.value.size() >= 4) {
+                    int32_t def; memcpy(&def, field.value.data(), 4); current_card["def"] = def;
+                }
+            }
+            if (current_card.contains("code")) {
+                cards.push_back(current_card);
+            }
+
+            player_zones[loc_names[l]] = cards;
+        }
+
+        zones[pkey] = player_zones;
+    }
+    result["zones"] = zones;
 
     return result;
 }
