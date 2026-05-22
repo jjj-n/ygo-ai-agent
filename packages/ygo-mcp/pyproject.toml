@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ygo-mcp"
+version = "0.1.0"
+description = "Unified YGO MCP Server"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp[cli]>=1.0.0",
+    "ygo-state>=0.1.0",
+    "ygo-action>=0.1.0",
+    "ygo-analysis>=0.1.0",
+    "ygo-battle>=0.1.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ygo_mcp"]
