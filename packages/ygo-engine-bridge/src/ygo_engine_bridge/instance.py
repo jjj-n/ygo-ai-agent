@@ -5,8 +5,21 @@ import uuid
 from typing import Optional
 
 from .process import EngineProcess, _DEFAULT_CARD_DB, _DEFAULT_SCRIPTS
+from .cards import CardDatabase
 from .state import GameState, Move, MoveResult, GameEvent, Card, PlayerState, FieldZone, ChainState
 from .types import Phase, MoveType, DUEL_STATUS_AWAITING, DUEL_STATUS_END, DUEL_STATUS_CONTINUE
+
+# Lazy-loaded card database singleton
+_card_db: Optional[CardDatabase] = None
+
+
+def _get_card_db() -> CardDatabase:
+    """Get or initialize the card database singleton."""
+    global _card_db
+    if _card_db is None:
+        _card_db = CardDatabase(str(_DEFAULT_CARD_DB))
+        _card_db.connect()
+    return _card_db
 
 # --- LLM-friendly name mappings ---
 
@@ -43,7 +56,7 @@ def _format_card(card_data: dict, zone: str = "") -> dict:
 
     Args:
         card_data: Raw card data from engine query
-        zone: Zone context ("monster", "spell_trap", "hand", etc.)
+        zone: Zone context ("monster", "spell_trap", "hand", "graveyard", etc.)
               Used to correctly interpret position values.
     """
     code = card_data.get("code", 0)
@@ -62,6 +75,16 @@ def _format_card(card_data: dict, zone: str = "") -> dict:
         "position": _POSITION_NAMES.get(pos, f"unknown(0x{pos:x})"),
         "is_faceup": bool(pos & 0x15) or pos == 0xa,  # faceup positions + hand
     }
+
+    # Resolve card name from database (faceup cards or hand)
+    if pos & 0x15 or pos == 0xa:  # faceup or in hand
+        try:
+            db = _get_card_db()
+            info = db.get_card(code)
+            if info and info.get("name"):
+                result["name"] = info["name"]
+        except Exception:
+            pass  # DB not available — skip name resolution
 
     # Monster card (type & 0x1)
     if card_type & 0x1:
