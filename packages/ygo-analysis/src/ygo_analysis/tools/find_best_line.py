@@ -1,8 +1,8 @@
 """Tool: find_best_line - Find the best move sequence."""
 
 from __future__ import annotations
-from typing import Optional
 from ygo_engine_bridge import GameInstance
+from ygo_engine_bridge.instance import _format_card
 
 
 async def find_best_line(
@@ -28,7 +28,6 @@ async def find_best_line(
     try:
         instance = GameInstance.get(game_id)
 
-        # Get current state and legal moves
         current_state = instance.get_state(player_pov=player)
         legal_moves = instance.get_legal_moves()
 
@@ -39,53 +38,74 @@ async def find_best_line(
                 "message": "No legal moves available",
             }
 
-        # For each legal move, evaluate the resulting position
-        evaluated_moves = []
+        # Build list of concrete moves from idlecmd/battlecmd prompts
+        candidate_moves = []
+        for move_info in legal_moves:
+            t = move_info.get("type")
+            if t == "idlecmd":
+                if move_info.get("summon_count", 0) > 0:
+                    candidate_moves.append({"type": "summon", "index": 0, "desc": "召唤怪兽"})
+                if move_info.get("spsummon_count", 0) > 0:
+                    candidate_moves.append({"type": "spsummon", "index": 0, "desc": "特殊召唤"})
+                if move_info.get("activate_count", 0) > 0:
+                    candidate_moves.append({"type": "activate", "index": 0, "desc": "发动效果"})
+                if move_info.get("sset_count", 0) > 0:
+                    candidate_moves.append({"type": "sset", "index": 0, "desc": "覆盖魔法/陷阱"})
+                if move_info.get("mset_count", 0) > 0:
+                    candidate_moves.append({"type": "mset", "index": 0, "desc": "覆盖怪兽"})
+                if move_info.get("to_bp", 0):
+                    candidate_moves.append({"type": "to_bp", "desc": "进入战斗阶段"})
+            elif t == "battlecmd":
+                if move_info.get("attack_count", 0) > 0:
+                    candidate_moves.append({"type": "attack", "index": 0, "desc": "攻击"})
+                if move_info.get("activate_count", 0) > 0:
+                    candidate_moves.append({"type": "activate", "index": 0, "desc": "战斗阶段发动效果"})
 
-        for i, move_info in enumerate(legal_moves[:10]):  # Limit to first 10 moves
-            # Create a move from the legal move info
-            move_type = move_info.get("type", "unknown")
+        # Evaluate each candidate
+        evaluated = []
+        my_lp = current_state.get("player", {}).get("lp", 8000)
+        opp_lp = current_state.get("opponent", {}).get("lp", 8000)
+        my_monsters = len([m for m in current_state.get("player", {}).get("monster_zones", []) if m])
+        opp_monsters = len([m for m in current_state.get("opponent", {}).get("monster_zones", []) if m])
 
-            # Evaluate the position after this move
-            # In a full implementation, we would:
-            # 1. Clone the game state
-            # 2. Execute the move
-            # 3. Evaluate the resulting position
-            # 4. If depth > 1, continue searching
+        for move in candidate_moves:
+            score = 50.0
+            mt = move.get("type", "")
 
-            # For now, use a simple heuristic based on the move type
-            score = 50.0  # Base score
+            if mt == "summon":
+                score += 5 + (5 if my_monsters < opp_monsters else 0)
+            elif mt == "spsummon":
+                score += 8
+            elif mt == "activate":
+                score += 6
+            elif mt == "attack":
+                score += 10 if opp_monsters == 0 else 3  # Direct attack bonus
+            elif mt == "sset":
+                score += 3
+            elif mt == "mset":
+                score += 2
+            elif mt == "to_bp":
+                score += 4 if my_monsters > 0 else -5
 
-            # Simple heuristics
-            if move_type == "summon":
-                score += 5  # Summoning is generally good
-            elif move_type == "special_summon":
-                score += 8  # Special summon is better
-            elif move_type == "activate_effect":
-                score += 3  # Effects are situationally good
-            elif move_type == "set_trap":
-                score += 2  # Setting traps is defensive
-            elif move_type == "phase_end":
-                score -= 2  # Ending turn is less optimal
-
-            evaluated_moves.append({
-                "move": move_info,
-                "score": score,
+            evaluated.append({
+                "move": move,
+                "score": round(score, 1),
                 "depth": 1,
             })
 
-        # Sort by score (descending)
-        evaluated_moves.sort(key=lambda x: x["score"], reverse=True)
-
-        # Return top-k
-        top_lines = evaluated_moves[:top_k]
+        evaluated.sort(key=lambda x: x["score"], reverse=True)
+        top_lines = evaluated[:top_k]
 
         return {
             "success": True,
             "lines": top_lines,
-            "current_state": current_state,
-            "total_legal_moves": len(legal_moves),
-            "searched_moves": min(len(legal_moves), 10),
+            "current_state_summary": {
+                "my_lp": my_lp,
+                "opp_lp": opp_lp,
+                "my_monsters": my_monsters,
+                "opp_monsters": opp_monsters,
+            },
+            "total_candidates": len(candidate_moves),
             "max_depth": max_depth,
         }
 
