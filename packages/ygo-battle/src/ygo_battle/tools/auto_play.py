@@ -5,17 +5,43 @@ from typing import Optional
 from ygo_engine_bridge import GameInstance
 
 
-def _pick_move_aggressive(moves: list[dict], player: int) -> dict | None:
-    """Pick the best move for an aggressive strategy.
+def _handle_prompts(moves: list[dict]) -> dict | None:
+    """Handle non-idlecmd/battlecmd prompts (select_card, yes/no, etc.)."""
+    for m in moves:
+        t = m.get("type")
+        if t == "select_chain":
+            count = m.get("count", 0)
+            if count > 0:
+                return {"type": "chain", "index": 0}
+            return {"type": "chain", "index": -1}
+        if t == "select_card":
+            cards = m.get("cards", [])
+            if cards:
+                return {"type": "select", "indices": [0]}
+        if t in ("select_effectyn", "select_yesno"):
+            return {"type": "yes"}
+        if t == "select_option":
+            return {"type": "option", "option": 0}
+        if t == "select_position":
+            positions = m.get("positions", [1])
+            return {"type": "position", "position": positions[0] if positions else 1}
+        if t == "select_tribute":
+            return {"type": "select", "indices": [0]}
+    return None
 
-    Priority: summon > spsummon > activate > sset > mset > to_bp > to_ep
-    """
+
+def _pick_move_aggressive(moves: list[dict], player: int) -> dict | None:
+    """Aggressive: summon > spsummon > activate > sset > mset > to_bp > attack."""
     if not moves:
         return None
 
+    # Handle prompts first
+    prompt = _handle_prompts(moves)
+    if prompt:
+        return prompt
+
     idlecmd = None
     battlecmd = None
-    other = []
 
     for m in moves:
         t = m.get("type")
@@ -23,8 +49,6 @@ def _pick_move_aggressive(moves: list[dict], player: int) -> dict | None:
             idlecmd = m
         elif t == "battlecmd":
             battlecmd = m
-        else:
-            other.append(m)
 
     # Battle phase: attack if possible
     if battlecmd:
@@ -37,7 +61,7 @@ def _pick_move_aggressive(moves: list[dict], player: int) -> dict | None:
         if battlecmd.get("to_ep", 0):
             return {"type": "to_ep_battle"}
 
-    # Main phase: summon > set > end
+    # Main phase: summon > set > battle > end
     if idlecmd:
         if idlecmd.get("summon_count", 0) > 0:
             return {"type": "summon", "index": 0}
@@ -54,32 +78,63 @@ def _pick_move_aggressive(moves: list[dict], player: int) -> dict | None:
         if idlecmd.get("to_ep", 0):
             return {"type": "to_ep"}
 
-    # Handle other prompt types
-    for m in other:
-        t = m.get("type")
-        if t == "select_chain":
-            count = m.get("count", 0)
-            if count > 0:
-                return {"type": "chain", "index": 0}
-            return {"type": "chain", "index": -1}  # pass
-        if t == "select_card":
-            # Select first available card (e.g., attack target)
-            cards = m.get("cards", [])
-            if cards:
-                return {"type": "select", "indices": [0]}
-        if t == "select_effectyn" or t == "select_yesno":
-            return {"type": "yes"}
-        if t == "select_option":
-            return {"type": "option", "option": 0}
-        if t == "select_position":
-            # Pick first available position
-            positions = m.get("positions", [1])
-            return {"type": "position", "position": positions[0] if positions else 1}
-        if t == "select_tribute":
-            # Select first available tribute
-            return {"type": "select", "indices": [0]}
+    return {"type": "to_ep"}
 
-    return {"type": "to_ep"}  # fallback
+
+def _pick_move_control(moves: list[dict], player: int) -> dict | None:
+    """Control: set traps > activate effects > summon > attack > end."""
+    if not moves:
+        return None
+
+    prompt = _handle_prompts(moves)
+    if prompt:
+        return prompt
+
+    idlecmd = None
+    battlecmd = None
+
+    for m in moves:
+        t = m.get("type")
+        if t == "idlecmd":
+            idlecmd = m
+        elif t == "battlecmd":
+            battlecmd = m
+
+    # Battle phase: activate effects first, then attack
+    if battlecmd:
+        if battlecmd.get("activate_count", 0) > 0:
+            return {"type": "activate", "index": 0}
+        if battlecmd.get("attack_count", 0) > 0:
+            return {"type": "attack", "index": 0}
+        if battlecmd.get("to_m2", 0):
+            return {"type": "to_m2"}
+        if battlecmd.get("to_ep", 0):
+            return {"type": "to_ep_battle"}
+
+    # Main phase: set traps > activate > summon > set monster > battle > end
+    if idlecmd:
+        if idlecmd.get("sset_count", 0) > 0:
+            return {"type": "sset", "index": 0}
+        if idlecmd.get("activate_count", 0) > 0:
+            return {"type": "activate", "index": 0}
+        if idlecmd.get("summon_count", 0) > 0:
+            return {"type": "summon", "index": 0}
+        if idlecmd.get("spsummon_count", 0) > 0:
+            return {"type": "spsummon", "index": 0}
+        if idlecmd.get("mset_count", 0) > 0:
+            return {"type": "mset", "index": 0}
+        if idlecmd.get("to_bp", 0):
+            return {"type": "to_bp"}
+        if idlecmd.get("to_ep", 0):
+            return {"type": "to_ep"}
+
+    return {"type": "to_ep"}
+
+
+_STRATEGIES = {
+    "aggressive": _pick_move_aggressive,
+    "control": _pick_move_control,
+}
 
 
 async def auto_play(
@@ -117,9 +172,11 @@ async def auto_play(
             },
         })
 
+        pick_p1 = _STRATEGIES.get(strategy_p1, _pick_move_aggressive)
+        pick_p2 = _STRATEGIES.get(strategy_p2, _pick_move_control)
+
         # Battle loop
         while turn_count < max_turns:
-            # Get legal moves
             moves = instance.get_legal_moves()
             if not moves:
                 break
@@ -128,13 +185,11 @@ async def auto_play(
             move_type = current_move.get("type", "")
             player = current_move.get("player", 0) + 1
 
-            # Check game over
             if instance._state and instance._state.is_game_over:
                 break
 
-            # Pick move based on strategy
-            strategy = strategy_p1 if player == 1 else strategy_p2
-            chosen = _pick_move_aggressive(moves, player)
+            pick_fn = pick_p1 if player == 1 else pick_p2
+            chosen = pick_fn(moves, player)
 
             if chosen is None:
                 break
@@ -146,9 +201,7 @@ async def auto_play(
             # Execute move
             response = instance.do_move_raw(chosen)
             if not response.get("ok"):
-                # If move failed, try end turn as fallback
                 if chosen.get("type") not in ("to_ep", "to_ep_battle"):
-                    # Try the correct end-phase command
                     fallback = {"type": "to_ep_battle"} if move_type == "battlecmd" else {"type": "to_ep"}
                     response = instance.do_move_raw(fallback)
                     if not response.get("ok"):
