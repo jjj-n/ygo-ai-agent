@@ -63,6 +63,7 @@ public:
     bool create_duel(uint64_t seed, uint64_t flags = 0);
     void add_card(uint8_t team, uint32_t code, uint32_t loc, uint32_t seq = 0, uint32_t pos = 0);
     bool start_duel();
+    void shuffle_deck(uint8_t playerid);
     int process();
     std::vector<uint8_t> get_messages();
     void set_response(const std::vector<uint8_t>& response);
@@ -79,6 +80,7 @@ private:
     std::string scripts_path_;
     std::unordered_map<uint32_t, CardEntry> card_db_;
 
+    bool load_global_script(const char* name);
     static void card_reader_callback(void* payload, uint32_t code, OCG_CardData* data);
     static int  script_reader_callback(void* payload, OCG_Duel duel, const char* name);
     static void log_callback(void* payload, const char* string, int type);

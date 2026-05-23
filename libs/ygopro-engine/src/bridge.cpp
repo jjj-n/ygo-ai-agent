@@ -129,6 +129,13 @@ bool DuelBridge::create_duel(uint64_t seed, uint64_t flags) {
         return false;
     }
 
+    // Load global Lua scripts (constant.lua, utility.lua) into the duel's Lua state.
+    // These define constants (EFFECT_TYPE_ACTIVATE, etc.) and utilities (Auxiliary, bit)
+    // that card scripts depend on. The engine only loads card scripts on-demand, so we
+    // must preload these before any card is registered.
+    load_global_script("constant.lua");
+    load_global_script("utility.lua");
+
     state_.started = false;
     state_.finished = false;
     state_.winner = -1;
@@ -167,6 +174,11 @@ bool DuelBridge::start_duel() {
     OCG_StartDuel(state_.handle);
     state_.started = true;
     return true;
+}
+
+void DuelBridge::shuffle_deck(uint8_t playerid) {
+    if (!state_.handle) return;
+    OCG_DuelShuffleDeck(state_.handle, playerid);
 }
 
 int DuelBridge::process() {
@@ -231,6 +243,26 @@ uint32_t DuelBridge::query_count(uint8_t team, uint32_t loc) {
 bool DuelBridge::load_script(const char* buf, uint32_t len, const char* name) {
     if (!state_.handle) return false;
     return OCG_LoadScript(state_.handle, buf, len, name) == 1;
+}
+
+bool DuelBridge::load_global_script(const char* name) {
+    std::string path = scripts_path_ + "/" + name;
+    std::ifstream file(path, std::ios::binary);
+    if (!file.is_open()) {
+        std::cerr << "Warning: Cannot load global script: " << path << std::endl;
+        return false;
+    }
+    file.seekg(0, std::ios::end);
+    size_t size = file.tellg();
+    file.seekg(0, std::ios::beg);
+    std::vector<char> buffer(size);
+    file.read(buffer.data(), size);
+    file.close();
+    bool ok = load_script(buffer.data(), static_cast<uint32_t>(size), name);
+    if (!ok) {
+        std::cerr << "Warning: Failed to load global script: " << name << std::endl;
+    }
+    return ok;
 }
 
 void DuelBridge::destroy_duel() {

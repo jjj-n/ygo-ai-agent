@@ -85,6 +85,10 @@ json ProtocolHandler::cmd_init(const json& params) {
         bridge_.add_card(1, deck_p2[i], LOCATION_DECK, static_cast<uint32_t>(i));
     }
 
+    // Shuffle decks (engine's startup processor clears shuffle flags before draw)
+    bridge_.shuffle_deck(0);
+    bridge_.shuffle_deck(1);
+
     if (!bridge_.start_duel()) {
         return {{"ok", false}, {"error", "start_failed"}, {"reason", "Failed to start duel"}};
     }
@@ -288,15 +292,20 @@ json ProtocolHandler::cmd_do_move(const json& params) {
     // Process until next AWAITING or END, accumulating messages
     std::vector<uint8_t> all_messages;
     int status = YGO::DUEL_STATUS_CONTINUE;
-    while (status == YGO::DUEL_STATUS_CONTINUE) {
-        status = bridge_.process();
-        auto msgs = bridge_.get_messages();
-        all_messages.insert(all_messages.end(), msgs.begin(), msgs.end());
-    }
+    try {
+        while (status == YGO::DUEL_STATUS_CONTINUE) {
+            status = bridge_.process();
+            auto msgs = bridge_.get_messages();
+            all_messages.insert(all_messages.end(), msgs.begin(), msgs.end());
+        }
 
-    // Also get any remaining messages after final process
-    auto final_msgs = bridge_.get_messages();
-    all_messages.insert(all_messages.end(), final_msgs.begin(), final_msgs.end());
+        // Also get any remaining messages after final process
+        auto final_msgs = bridge_.get_messages();
+        all_messages.insert(all_messages.end(), final_msgs.begin(), final_msgs.end());
+    } catch (const std::exception& e) {
+        std::cerr << "[ENGINE ERROR] Exception during process: " << e.what() << std::endl;
+        return {{"ok", false}, {"error", "process_error"}, {"reason", e.what()}};
+    }
 
     // Cache and parse all accumulated messages
     cached_messages_ = std::move(all_messages);
@@ -601,22 +610,49 @@ json ProtocolHandler::parse_legal_moves(const std::vector<uint8_t>& buf) {
                 uint8_t player = read_u8(buf, pos);
                 // summon: code(4)+ctrl(1)+loc(1)+seq(4) = 10 bytes each
                 uint32_t summon_count = read_u32(buf, pos);
-                for (uint32_t i = 0; i < summon_count; i++) { read_u32(buf, pos); read_u8(buf, pos); read_u8(buf, pos); read_u32(buf, pos); }
+                json summon_cards = json::array();
+                for (uint32_t i = 0; i < summon_count; i++) {
+                    uint32_t code = read_u32(buf, pos); uint8_t ctrl = read_u8(buf, pos);
+                    uint8_t loc = read_u8(buf, pos); uint32_t seq = read_u32(buf, pos);
+                    summon_cards.push_back({{"code", code}, {"controller", ctrl}, {"location", loc}, {"sequence", seq}});
+                }
                 // spsummon: code(4)+ctrl(1)+loc(1)+seq(4) = 10 bytes each
                 uint32_t spsummon_count = read_u32(buf, pos);
-                for (uint32_t i = 0; i < spsummon_count; i++) { read_u32(buf, pos); read_u8(buf, pos); read_u8(buf, pos); read_u32(buf, pos); }
+                json spsummon_cards = json::array();
+                for (uint32_t i = 0; i < spsummon_count; i++) {
+                    uint32_t code = read_u32(buf, pos); uint8_t ctrl = read_u8(buf, pos);
+                    uint8_t loc = read_u8(buf, pos); uint32_t seq = read_u32(buf, pos);
+                    spsummon_cards.push_back({{"code", code}, {"controller", ctrl}, {"location", loc}, {"sequence", seq}});
+                }
                 // reposition: code(4)+ctrl(1)+loc(1)+seq(1) = 7 bytes each
                 uint32_t repos_count = read_u32(buf, pos);
                 for (uint32_t i = 0; i < repos_count; i++) { read_u32(buf, pos); read_u8(buf, pos); read_u8(buf, pos); read_u8(buf, pos); }
                 // mset: code(4)+ctrl(1)+loc(1)+seq(4) = 10 bytes each
                 uint32_t mset_count = read_u32(buf, pos);
-                for (uint32_t i = 0; i < mset_count; i++) { read_u32(buf, pos); read_u8(buf, pos); read_u8(buf, pos); read_u32(buf, pos); }
+                json mset_cards = json::array();
+                for (uint32_t i = 0; i < mset_count; i++) {
+                    uint32_t code = read_u32(buf, pos); uint8_t ctrl = read_u8(buf, pos);
+                    uint8_t loc = read_u8(buf, pos); uint32_t seq = read_u32(buf, pos);
+                    mset_cards.push_back({{"code", code}, {"controller", ctrl}, {"location", loc}, {"sequence", seq}});
+                }
                 // sset: code(4)+ctrl(1)+loc(1)+seq(4) = 10 bytes each
                 uint32_t sset_count = read_u32(buf, pos);
-                for (uint32_t i = 0; i < sset_count; i++) { read_u32(buf, pos); read_u8(buf, pos); read_u8(buf, pos); read_u32(buf, pos); }
+                json sset_cards = json::array();
+                for (uint32_t i = 0; i < sset_count; i++) {
+                    uint32_t code = read_u32(buf, pos); uint8_t ctrl = read_u8(buf, pos);
+                    uint8_t loc = read_u8(buf, pos); uint32_t seq = read_u32(buf, pos);
+                    sset_cards.push_back({{"code", code}, {"controller", ctrl}, {"location", loc}, {"sequence", seq}});
+                }
                 // activate: code(4)+ctrl(1)+loc(1)+seq(4)+desc(8)+mode(1) = 19 bytes each
                 uint32_t activate_count = read_u32(buf, pos);
-                for (uint32_t i = 0; i < activate_count; i++) { read_u32(buf, pos); read_u8(buf, pos); read_u8(buf, pos); read_u32(buf, pos); read_u32(buf, pos); read_u32(buf, pos); read_u8(buf, pos); }
+                json activate_cards = json::array();
+                for (uint32_t i = 0; i < activate_count; i++) {
+                    uint32_t code = read_u32(buf, pos); uint8_t ctrl = read_u8(buf, pos);
+                    uint8_t loc = read_u8(buf, pos); uint32_t seq = read_u32(buf, pos);
+                    uint32_t desc_lo = read_u32(buf, pos); uint32_t desc_hi = read_u32(buf, pos);
+                    uint8_t mode = read_u8(buf, pos);
+                    activate_cards.push_back({{"code", code}, {"controller", ctrl}, {"location", loc}, {"sequence", seq}, {"mode", mode}});
+                }
                 // to_bp, to_ep, can_shuffle flags
                 uint8_t to_bp = read_u8(buf, pos);
                 uint8_t to_ep = read_u8(buf, pos);
@@ -625,12 +661,12 @@ json ProtocolHandler::parse_legal_moves(const std::vector<uint8_t>& buf) {
                 last_prompt = {
                     {"type", "idlecmd"},
                     {"player", player},
-                    {"summon_count", summon_count},
-                    {"spsummon_count", spsummon_count},
+                    {"summon_count", summon_count}, {"summon_cards", summon_cards},
+                    {"spsummon_count", spsummon_count}, {"spsummon_cards", spsummon_cards},
                     {"reposition_count", repos_count},
-                    {"mset_count", mset_count},
-                    {"sset_count", sset_count},
-                    {"activate_count", activate_count},
+                    {"mset_count", mset_count}, {"mset_cards", mset_cards},
+                    {"sset_count", sset_count}, {"sset_cards", sset_cards},
+                    {"activate_count", activate_count}, {"activate_cards", activate_cards},
                     {"to_bp", to_bp},
                     {"to_ep", to_ep},
                     {"can_shuffle", can_shuffle}
@@ -643,10 +679,22 @@ json ProtocolHandler::parse_legal_moves(const std::vector<uint8_t>& buf) {
                 // NOTE: ygopro-core writes activatable FIRST, then attackable
                 // activate: code(4)+ctrl(1)+loc(1)+seq(4)+desc(uint64=8)+mode(1) = 19 bytes each
                 uint32_t activate_count = read_u32(buf, pos);
-                for (uint32_t i = 0; i < activate_count; i++) { read_u32(buf, pos); read_u8(buf, pos); read_u8(buf, pos); read_u32(buf, pos); read_u32(buf, pos); read_u32(buf, pos); read_u8(buf, pos); }
+                json battle_activate_cards = json::array();
+                for (uint32_t i = 0; i < activate_count; i++) {
+                    uint32_t code = read_u32(buf, pos); uint8_t ctrl = read_u8(buf, pos);
+                    uint8_t loc = read_u8(buf, pos); uint32_t seq = read_u32(buf, pos);
+                    uint32_t desc_lo = read_u32(buf, pos); uint32_t desc_hi = read_u32(buf, pos);
+                    uint8_t mode = read_u8(buf, pos);
+                    battle_activate_cards.push_back({{"code", code}, {"controller", ctrl}, {"location", loc}, {"sequence", seq}, {"mode", mode}});
+                }
                 // attack: code(4)+ctrl(1)+loc(1)+seq(uint8=1)+direct(uint8=1) = 8 bytes each
                 uint32_t attack_count = read_u32(buf, pos);
-                for (uint32_t i = 0; i < attack_count; i++) { read_u32(buf, pos); read_u8(buf, pos); read_u8(buf, pos); read_u8(buf, pos); read_u8(buf, pos); }
+                json attack_cards = json::array();
+                for (uint32_t i = 0; i < attack_count; i++) {
+                    uint32_t code = read_u32(buf, pos); uint8_t ctrl = read_u8(buf, pos);
+                    uint8_t loc = read_u8(buf, pos); uint8_t seq = read_u8(buf, pos); uint8_t direct = read_u8(buf, pos);
+                    attack_cards.push_back({{"code", code}, {"controller", ctrl}, {"location", loc}, {"sequence", seq}, {"direct", direct}});
+                }
                 // to_m2, to_ep flags
                 uint8_t to_m2 = read_u8(buf, pos);
                 uint8_t to_ep = read_u8(buf, pos);
@@ -654,8 +702,8 @@ json ProtocolHandler::parse_legal_moves(const std::vector<uint8_t>& buf) {
                 last_prompt = {
                     {"type", "battlecmd"},
                     {"player", player},
-                    {"attack_count", attack_count},
-                    {"activate_count", activate_count},
+                    {"attack_count", attack_count}, {"attack_cards", attack_cards},
+                    {"activate_count", activate_count}, {"battle_activate_cards", battle_activate_cards},
                     {"to_m2", to_m2},
                     {"to_ep", to_ep}
                 };

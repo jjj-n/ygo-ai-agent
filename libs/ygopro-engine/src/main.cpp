@@ -24,9 +24,11 @@ int main(int argc, char* argv[]) {
 
     // Main loop: read JSON from stdin, write responses to stdout
     std::string line;
+    int cmd_count = 0;
     while (std::getline(std::cin, line)) {
         if (line.empty()) continue;
 
+        cmd_count++;
         try {
             json cmd = json::parse(line);
             json response = protocol.handle_command(cmd);
@@ -36,15 +38,18 @@ int main(int argc, char* argv[]) {
             std::cout.flush();
 
         } catch (const json::parse_error& e) {
+            std::cerr << "[ENGINE ERROR] Parse error at cmd " << cmd_count << ": " << e.what() << std::endl;
             json error = {{"ok", false}, {"error", "parse_error"}, {"reason", e.what()}};
             std::cout << error.dump() << std::endl;
             std::cout.flush();
         } catch (const std::exception& e) {
+            std::cerr << "[ENGINE ERROR] Exception at cmd " << cmd_count << ": " << e.what() << std::endl;
             json error = {{"ok", false}, {"error", "internal_error"}, {"reason", e.what()}};
             std::cout << error.dump() << std::endl;
             std::cout.flush();
         }
     }
+    std::cerr << "[ENGINE] Processed " << cmd_count << " commands, exiting." << std::endl;
 
     return 0;
 }

@@ -21,12 +21,11 @@ class EngineProcess:
         """Initialize with path to ygopro-engine executable.
 
         Args:
-            engine_path: Path to ygopro-engine binary. If None, uses YGOPRO_ENGINE_PATH env var
-                         or the default build location.
+            engine_path: Path to ygopro-engine binary. If None, uses default build location.
         """
-        self._engine_path = engine_path or os.environ.get(
-            "YGOPRO_ENGINE_PATH", str(_DEFAULT_ENGINE)
-        )
+        # Always prefer the default absolute path (relative to this file)
+        # Environment variable may be a relative path that doesn't resolve correctly
+        self._engine_path = str(_DEFAULT_ENGINE)
         self._process: Optional[subprocess.Popen] = None
         self._card_db_path = ""
         self._scripts_path = ""
@@ -58,6 +57,8 @@ class EngineProcess:
             cmd.append(scripts_path)
 
         try:
+            # Use DEVNULL for stderr to avoid blocking on pipe buffer
+            # Error messages will be captured via polling when needed
             self._process = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
@@ -84,11 +85,12 @@ class EngineProcess:
                 self._process.kill()
             self._process = None
 
-    def send_command(self, cmd: dict) -> dict:
+    def send_command(self, cmd: dict, timeout: float = 30.0) -> dict:
         """Send a JSON command and receive a JSON response.
 
         Args:
             cmd: Command dictionary to send
+            timeout: Maximum time to wait for response in seconds
 
         Returns:
             Response dictionary from engine
@@ -96,6 +98,8 @@ class EngineProcess:
         Raises:
             RuntimeError: If engine is not running or returns an error
         """
+        import threading
+
         if not self.is_running:
             raise RuntimeError("Engine is not running. Call start() first.")
 
@@ -104,10 +108,31 @@ class EngineProcess:
         self._process.stdin.write(cmd_json)
         self._process.stdin.flush()
 
-        # Read response
-        response_line = self._process.stdout.readline()
+        # Read response with timeout using a background thread
+        result = [None]
+        error = [None]
+
+        def read_line():
+            try:
+                result[0] = self._process.stdout.readline()
+            except Exception as e:
+                error[0] = e
+
+        thread = threading.Thread(target=read_line, daemon=True)
+        thread.start()
+        thread.join(timeout=timeout)
+
+        if thread.is_alive():
+            # Timeout - kill the engine process
+            self.stop()
+            raise RuntimeError(f"Engine response timeout after {timeout}s. Engine process killed.")
+
+        if error[0]:
+            raise RuntimeError(f"Error reading from engine: {error[0]}")
+
+        response_line = result[0]
         if not response_line:
-            raise RuntimeError("Engine closed unexpectedly")
+            raise RuntimeError(f"Engine closed unexpectedly. Exit code: {self._process.returncode}")
 
         try:
             response = json.loads(response_line)

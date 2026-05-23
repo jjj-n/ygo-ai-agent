@@ -51,6 +51,15 @@ _POSITION_NAMES = {
 }
 
 
+def _convert_winner(raw: int) -> int:
+    """Convert engine's 0-based winner to 1-based (0=P1, 1=P2, 2=draw→0)."""
+    if raw < 0:
+        return -1
+    if raw == 2:
+        return 0  # draw
+    return raw + 1  # 0→1, 1→2
+
+
 def _format_card(card_data: dict, zone: str = "") -> dict:
     """Transform raw engine card data into LLM-friendly format.
 
@@ -267,8 +276,9 @@ class GameInstance:
             "turn": data.get("turn", 0),
             "phase": _PHASE_NAMES.get(phase_raw, f"unknown(0x{phase_raw:x})"),
             "current_player": current_player + 1,  # engine 0-based → 1-based
+            "lp": {my_key: lp.get(my_key, 8000), opp_key: lp.get(opp_key, 8000)},
             "is_game_over": data.get("finished", False),
-            "winner": data.get("winner", -1) if data.get("finished") else None,
+            "winner": _convert_winner(data.get("winner", -1)) if data.get("finished") and data.get("winner", -1) >= 0 else None,
             "player": build_player_state(my_key, hide_hand=False),
             "opponent": build_player_state(opp_key, hide_hand=not include_hidden),
             "chain": {"active": False},  # TODO: chain state from engine
@@ -276,6 +286,9 @@ class GameInstance:
 
     def get_legal_moves(self) -> list[dict]:
         """Get all legal moves in the current position.
+
+        Auto-handles prompts (select_place, select_counter, etc.) so the
+        returned list only contains actual game moves (idlecmd/battlecmd).
 
         Returns:
             List of legal move dictionaries
@@ -289,6 +302,34 @@ class GameInstance:
             raise RuntimeError(f"Failed to get legal moves: {response.get('reason')}")
 
         moves = response.get("data", {}).get("moves", [])
+
+        # Auto-handle prompts that appear as "moves" (select_place, etc.)
+        # so callers only see actual game moves (idlecmd/battlecmd).
+        max_prompt_iterations = 10
+        prompt_iterations = 0
+        while moves and prompt_iterations < max_prompt_iterations:
+            first = moves[0]
+            first_type = first.get("type", "")
+            # If it's a game move (idlecmd/battlecmd), stop — let caller decide
+            if first_type in ("idlecmd", "battlecmd"):
+                break
+            # It's a prompt — handle it automatically
+            prompt_iterations += 1
+            resp = self._auto_handle_single_prompt(first)
+            if resp is None or not resp.get("ok"):
+                break
+            # Get next moves after handling the prompt
+            next_moves = resp.get("data", {}).get("next_moves", [])
+            if next_moves:
+                moves = next_moves
+            else:
+                # Re-fetch legal moves
+                response2 = self._engine.send_command({"cmd": "get_legal_moves"})
+                if response2.get("ok"):
+                    moves = response2.get("data", {}).get("moves", [])
+                else:
+                    moves = []
+                    break
 
         # Track state from moves (idlecmd tells us whose turn it is)
         if moves:
@@ -330,7 +371,7 @@ class GameInstance:
 
         return response
 
-    def _auto_handle_prompts(self, response: dict):
+    def _auto_handle_prompts(self, response: dict, max_iterations: int = 50):
         """Auto-handle prompts that don't need LLM decisions.
 
         Handles:
@@ -338,13 +379,20 @@ class GameInstance:
         - select_chain with count=0: auto-pass empty chain windows
         - select_effectyn: auto-respond "no"
         - select_yesno: auto-respond "no"
+        - select_card: auto-select minimum required cards
+        - select_tribute: auto-select minimum required tributes
+        - select_position: auto-select first position
+        - select_option: auto-select first option
+        - select_unselect_card: auto-select first card
 
         Updates response dict in-place so the caller sees the final state.
         """
         data = response.get("data", {})
         next_moves = data.get("next_moves", [])
 
-        while next_moves:
+        iterations = 0
+        while next_moves and iterations < max_iterations:
+            iterations += 1
             prompt = next_moves[0]
             prompt_type = prompt.get("type")
 
@@ -370,12 +418,69 @@ class GameInstance:
                 }}
                 resp = self._engine.send_command(cmd)
                 self._move_history.append(cmd)
-            elif prompt_type in ("select_effectyn", "select_yesno"):
-                # Auto-respond "no" - safe for vanilla cards, correct default for auto_play
+            elif prompt_type in ("effectyn", "yesno"):
+                # Auto-respond "no" - safe default, correct for auto_play
                 cmd = {"cmd": "respond_chain", "action": "no"}
                 resp = self._engine.send_command(cmd)
                 self._move_history.append(cmd)
+            elif prompt_type == "select_card":
+                # Auto-select minimum required cards
+                min_count = prompt.get("min", 1)
+                cards = prompt.get("cards", [])
+                if cards:
+                    indices = list(range(min(min_count, len(cards))))
+                    cmd = {"cmd": "do_move", "move": {"type": "select", "indices": indices}}
+                    resp = self._engine.send_command(cmd)
+                    self._move_history.append(cmd)
+                else:
+                    break
+            elif prompt_type == "select_tribute":
+                # Auto-select minimum required tributes
+                min_count = prompt.get("min", 1)
+                cards = prompt.get("cards", [])
+                if cards:
+                    indices = list(range(min(min_count, len(cards))))
+                    cmd = {"cmd": "do_move", "move": {"type": "select", "indices": indices}}
+                    resp = self._engine.send_command(cmd)
+                    self._move_history.append(cmd)
+                else:
+                    break
+            elif prompt_type == "select_position":
+                # Auto-select first position
+                positions = prompt.get("positions", [1])
+                pos = positions[0] if positions else 1
+                cmd = {"cmd": "do_move", "move": {"type": "position", "position": pos}}
+                resp = self._engine.send_command(cmd)
+                self._move_history.append(cmd)
+            elif prompt_type == "select_option":
+                # Auto-select first option
+                cmd = {"cmd": "do_move", "move": {"type": "option", "option": 0}}
+                resp = self._engine.send_command(cmd)
+                self._move_history.append(cmd)
+            elif prompt_type == "select_unselect_card":
+                # Auto-select first card
+                cmd = {"cmd": "do_move", "move": {"type": "select", "indices": [0]}}
+                resp = self._engine.send_command(cmd)
+                self._move_history.append(cmd)
+            elif prompt_type == "select_counter":
+                # Auto-select first counter to remove
+                cmd = {"cmd": "do_move", "move": {"type": "counter", "indices": [0]}}
+                resp = self._engine.send_command(cmd)
+                self._move_history.append(cmd)
+            elif prompt_type == "sort_card":
+                # Auto-sort in original order (0,1,2,...)
+                count = prompt.get("count", 1)
+                cmd = {"cmd": "do_move", "move": {"type": "sort", "indices": list(range(count))}}
+                resp = self._engine.send_command(cmd)
+                self._move_history.append(cmd)
+            elif prompt_type == "select_sum":
+                # Cannot auto-handle select_sum — needs card value selection
+                break
+            elif prompt_type in ("idlecmd", "battlecmd"):
+                break  # Game move, not a prompt — stop auto-handling
             else:
+                import sys
+                print(f"[WARNING] Unknown prompt type: {prompt_type}", file=sys.stderr)
                 break  # Prompt needs LLM decision
 
             if not resp.get("ok"):
@@ -384,7 +489,71 @@ class GameInstance:
             self._track_state(resp_data)
             next_moves = resp_data.get("next_moves", [])
 
+        if iterations >= max_iterations:
+            import sys
+            print(f"[WARNING] _auto_handle_prompts hit max iterations ({max_iterations})", file=sys.stderr)
+
         data["next_moves"] = next_moves
+
+    def _auto_handle_single_prompt(self, prompt: dict) -> dict | None:
+        """Handle a single prompt automatically. Returns engine response or None."""
+        prompt_type = prompt.get("type")
+
+        # Game moves are not prompts
+        if prompt_type in ("idlecmd", "battlecmd"):
+            return None
+
+        if prompt_type == "select_chain":
+            chain_count = prompt.get("count", 0)
+            if chain_count > 0:
+                return None
+            cmd = {"cmd": "respond_chain", "action": "pass"}
+        elif prompt_type == "select_place":
+            flag = prompt.get("flag", 0)
+            player = prompt.get("player", 0)
+            count = prompt.get("count", 1)
+            loc, seq = self._pick_first_zone(flag)
+            cmd = {"cmd": "do_move", "move": {
+                "type": "place", "player": player, "count": count,
+                "location": loc, "sequence": seq,
+            }}
+        elif prompt_type in ("effectyn", "yesno"):
+            cmd = {"cmd": "respond_chain", "action": "no"}
+        elif prompt_type == "select_card":
+            min_count = prompt.get("min", 1)
+            cards = prompt.get("cards", [])
+            if not cards:
+                return None
+            indices = list(range(min(min_count, len(cards))))
+            cmd = {"cmd": "do_move", "move": {"type": "select", "indices": indices}}
+        elif prompt_type == "select_tribute":
+            min_count = prompt.get("min", 1)
+            cards = prompt.get("cards", [])
+            if not cards:
+                return None
+            indices = list(range(min(min_count, len(cards))))
+            cmd = {"cmd": "do_move", "move": {"type": "select", "indices": indices}}
+        elif prompt_type == "select_position":
+            positions = prompt.get("positions", [1])
+            pos = positions[0] if positions else 1
+            cmd = {"cmd": "do_move", "move": {"type": "position", "position": pos}}
+        elif prompt_type == "select_option":
+            cmd = {"cmd": "do_move", "move": {"type": "option", "option": 0}}
+        elif prompt_type == "select_unselect_card":
+            cmd = {"cmd": "do_move", "move": {"type": "select", "indices": [0]}}
+        elif prompt_type == "select_counter":
+            cmd = {"cmd": "do_move", "move": {"type": "counter", "indices": [0]}}
+        elif prompt_type == "sort_card":
+            count = prompt.get("count", 1)
+            cmd = {"cmd": "do_move", "move": {"type": "sort", "indices": list(range(count))}}
+        else:
+            return None
+
+        resp = self._engine.send_command(cmd)
+        self._move_history.append(cmd)
+        if resp.get("ok"):
+            self._track_state(resp.get("data", {}))
+        return resp
 
     @staticmethod
     def _pick_first_zone(flag: int) -> tuple[int, int]:
@@ -566,13 +735,14 @@ class GameInstance:
         if data.get("game_over"):
             self._state.is_game_over = True
         # Winner can be at top level (from cmd_do_move) or in events
+        # Engine uses 0-based player index: 0=P1, 1=P2, 2=draw. Convert to 1-based.
         if "winner" in data and data["winner"] >= 0:
-            self._state.winner = data["winner"]
+            self._state.winner = _convert_winner(data["winner"])
         else:
             # Check events for MSG_WIN (type 5)
             for ev in data.get("events", []):
                 if ev.get("type") == 5 and "winner" in ev:
-                    self._state.winner = ev["winner"]
+                    self._state.winner = _convert_winner(ev["winner"])
                     break
 
         # Track turn/phase from events (MSG_NEW_TURN=40, MSG_NEW_PHASE=41)
