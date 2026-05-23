@@ -3,11 +3,15 @@
 from __future__ import annotations
 import uuid
 from typing import Optional
+from pathlib import Path
 
 from .process import EngineProcess, _DEFAULT_CARD_DB, _DEFAULT_SCRIPTS
 from .cards import CardDatabase
 from .state import GameState, Move, MoveResult, GameEvent, Card, PlayerState, FieldZone, ChainState
 from .types import Phase, MoveType, DUEL_STATUS_AWAITING, DUEL_STATUS_END, DUEL_STATUS_CONTINUE
+
+# Chinese card database path
+_DEFAULT_ZH_CARD_DB = Path(_DEFAULT_CARD_DB).parent / "cards_zh.cdb"
 
 # Lazy-loaded card database singleton
 _card_db: Optional[CardDatabase] = None
@@ -17,7 +21,8 @@ def _get_card_db() -> CardDatabase:
     """Get or initialize the card database singleton."""
     global _card_db
     if _card_db is None:
-        _card_db = CardDatabase(str(_DEFAULT_CARD_DB))
+        zh_path = str(_DEFAULT_ZH_CARD_DB) if _DEFAULT_ZH_CARD_DB.exists() else None
+        _card_db = CardDatabase(str(_DEFAULT_CARD_DB), zh_db_path=zh_path)
         _card_db.connect()
     return _card_db
 
@@ -85,13 +90,15 @@ def _format_card(card_data: dict, zone: str = "") -> dict:
         "is_faceup": bool(pos & 0x15) or pos == 0xa,  # faceup positions + hand
     }
 
-    # Resolve card name from database (faceup cards or hand)
+    # Resolve card name and effect text from database (faceup cards or hand)
     if pos & 0x15 or pos == 0xa:  # faceup or in hand
         try:
             db = _get_card_db()
             info = db.get_card(code)
             if info and info.get("name"):
                 result["name"] = info["name"]
+            if info and info.get("desc"):
+                result["effect_text"] = info["desc"]
         except Exception:
             pass  # DB not available — skip name resolution
 
@@ -257,9 +264,10 @@ class GameInstance:
         phase_raw = data.get("phase", 0) or 0x4  # default to main_phase_1 if 0
         current_player = data.get("current_player", 0)
 
-        def build_player_state(pkey: str, hide_hand: bool) -> dict:
+        def build_player_state(pkey: str, hide_hand: bool, hide_extra: bool = False) -> dict:
             pzones = zones.get(pkey, {})
             pcounts = counts.get(pkey, {})
+            extra_cards = pzones.get("extra", [])
             return {
                 "lp": lp.get(pkey, 8000),
                 "monster_zones": _format_zone(pzones.get("monster", []), zone="monster"),
@@ -270,6 +278,7 @@ class GameInstance:
                 "banished": _format_zone(pzones.get("banished", []), zone="banished"),
                 "deck_count": pcounts.get("deck", 0),
                 "extra_deck_count": pcounts.get("extra", 0),
+                "extra_deck": _format_zone(extra_cards, hide=hide_extra, zone="extra") if extra_cards else [],
             }
 
         return {
@@ -279,8 +288,8 @@ class GameInstance:
             "lp": {my_key: lp.get(my_key, 8000), opp_key: lp.get(opp_key, 8000)},
             "is_game_over": data.get("finished", False),
             "winner": _convert_winner(data.get("winner", -1)) if data.get("finished") and data.get("winner", -1) >= 0 else None,
-            "player": build_player_state(my_key, hide_hand=False),
-            "opponent": build_player_state(opp_key, hide_hand=not include_hidden),
+            "player": build_player_state(my_key, hide_hand=False, hide_extra=False),
+            "opponent": build_player_state(opp_key, hide_hand=not include_hidden, hide_extra=not include_hidden),
             "chain": {"active": False},  # TODO: chain state from engine
         }
 

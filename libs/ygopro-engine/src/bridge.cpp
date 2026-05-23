@@ -46,7 +46,7 @@ bool DuelBridge::init(const std::string& card_db_path, const std::string& script
         card.level = raw_level & 0xFF;
 
         // Pendulum scales are stored in upper bits of level
-        if (card.type & 0x2000000) { // TYPE_PENDULUM
+        if (card.type & 0x1000000) { // TYPE_PENDULUM
             card.lscale = (raw_level >> 24) & 0xFF;
             card.rscale = (raw_level >> 16) & 0xFF;
         } else {
@@ -55,7 +55,7 @@ bool DuelBridge::init(const std::string& card_db_path, const std::string& script
         }
 
         // Link markers
-        if (card.type & 0x400000) { // TYPE_LINK
+        if (card.type & 0x4000000) { // TYPE_LINK
             card.link_marker = card.defense; // defense field stores link markers for link monsters
         } else {
             card.link_marker = 0;
