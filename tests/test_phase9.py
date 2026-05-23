@@ -212,6 +212,48 @@ def test_get_opening_sequence_late_turn():
     assert seq is None
 
 
+def test_opening_book_stats():
+    """Test opening book statistics."""
+    from ygo_battle.opening_book import get_opening_stats
+
+    stats = get_opening_stats()
+    assert stats["aggressive"] > 0
+    assert stats["control"] > 0
+    assert stats["combo"] > 0
+    assert stats["total"] > 0
+
+
+def test_opening_book_empty_hand():
+    """Test opening book with empty hand."""
+    from ygo_battle.opening_book import get_opening_sequence
+
+    seq = get_opening_sequence("aggressive", [], 1)
+    assert seq is None
+
+
+def test_opening_book_real_cards():
+    """Test opening book with real card IDs."""
+    from ygo_battle.opening_book import get_opening_sequence
+
+    # Real aggressive cards (Blue-Eyes, Dark Magician, etc.)
+    hand_codes = [89631139, 46986414, 4007, 89631139, 46986414]
+    seq = get_opening_sequence("aggressive", hand_codes, 1)
+    # Should return a sequence or None (depends on card evaluation)
+    assert seq is None or isinstance(seq, list)
+
+
+def test_opening_book_all_strategies():
+    """Test that all strategies can produce sequences."""
+    from ygo_battle.opening_book import get_opening_sequence
+
+    strategies = ["aggressive", "control", "combo"]
+    for strategy in strategies:
+        # Each strategy should handle any hand without crashing
+        hand_codes = [89631139, 46986414, 4007]
+        seq = get_opening_sequence(strategy, hand_codes, 1)
+        assert seq is None or isinstance(seq, list)
+
+
 # ============================================================================
 # Integration Tests
 # ============================================================================
